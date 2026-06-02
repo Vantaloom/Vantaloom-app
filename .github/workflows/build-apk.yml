@@ -70,13 +70,27 @@ jobs:
       - name: Allow cleartext HTTP (Hub + mesh runtimes are http://)
         run: |
           set -euo pipefail
-          MANIFEST=src-tauri/gen/android/app/src/main/AndroidManifest.xml
-          if grep -q 'usesCleartextTraffic' "$MANIFEST"; then
-            echo "usesCleartextTraffic already present"
-          else
+          MAIN=src-tauri/gen/android/app/src/main
+          MANIFEST="$MAIN/AndroidManifest.xml"
+          # A network security config DEFINITIVELY permits cleartext, overriding
+          # the release-mode `usesCleartextTraffic=false` that Tauri injects via
+          # the ${usesCleartextTraffic} manifest placeholder.
+          mkdir -p "$MAIN/res/xml"
+          {
+            echo '<?xml version="1.0" encoding="utf-8"?>'
+            echo '<network-security-config>'
+            echo '    <base-config cleartextTrafficPermitted="true" />'
+            echo '</network-security-config>'
+          } > "$MAIN/res/xml/network_security_config.xml"
+          # Reference the config + force the attribute true (idempotent; covers
+          # both the placeholder form and a missing attribute).
+          grep -q 'networkSecurityConfig' "$MANIFEST" || \
+            sed -i 's|<application|<application android:networkSecurityConfig="@xml/network_security_config"|' "$MANIFEST"
+          sed -i 's|android:usesCleartextTraffic="[^"]*"|android:usesCleartextTraffic="true"|' "$MANIFEST"
+          grep -q 'usesCleartextTraffic="true"' "$MANIFEST" || \
             sed -i 's|<application|<application android:usesCleartextTraffic="true"|' "$MANIFEST"
-          fi
-          grep -n 'usesCleartextTraffic' "$MANIFEST" || { echo "ERROR: cleartext attr not added"; exit 1; }
+          echo "=== AndroidManifest <application> tag ==="
+          sed -n '/<application/,/>/p' "$MANIFEST"
 
       - name: Build APK (release — stripped, size-optimized)
         run: cargo tauri android build --apk --target ${{ env.TAURI_ANDROID_TARGET }}
