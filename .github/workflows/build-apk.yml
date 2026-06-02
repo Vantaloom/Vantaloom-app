@@ -67,6 +67,17 @@ jobs:
       - name: Generate app icons (real Vantaloom icon → all densities/mipmaps)
         run: cargo tauri icon app-icon.png
 
+      - name: Allow cleartext HTTP (Hub + mesh runtimes are http://)
+        run: |
+          set -euo pipefail
+          MANIFEST=src-tauri/gen/android/app/src/main/AndroidManifest.xml
+          if grep -q 'usesCleartextTraffic' "$MANIFEST"; then
+            echo "usesCleartextTraffic already present"
+          else
+            sed -i 's|<application|<application android:usesCleartextTraffic="true"|' "$MANIFEST"
+          fi
+          grep -n 'usesCleartextTraffic' "$MANIFEST" || { echo "ERROR: cleartext attr not added"; exit 1; }
+
       - name: Build APK (release — stripped, size-optimized)
         run: cargo tauri android build --apk --target ${{ env.TAURI_ANDROID_TARGET }}
 
