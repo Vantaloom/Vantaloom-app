@@ -132,16 +132,21 @@ jobs:
           echo "SIGNED_APK=$ALIGNED" >> "$GITHUB_ENV"
           echo "Signed release APK: $ALIGNED"
 
-      - name: Collect APKs
+      - name: Collect APK (uniquely named per build)
         run: |
           set -euo pipefail
           mkdir -p dist
-          # Copy only the signed release APK(s); never the unsigned/intermediate ones.
-          find src-tauri/gen/android -name '*-release-aligned.apk' -exec cp {} dist/ \;
-          echo "Built APKs:"; ls -la dist
-          if ! ls dist/*.apk >/dev/null 2>&1; then
-            echo "ERROR: no signed APK collected into dist/"; exit 1
+          # The signed release APK; never the unsigned/intermediate ones.
+          APK="$(find src-tauri/gen/android -name '*-release-aligned.apk' | head -n1)"
+          if [ -z "$APK" ]; then
+            echo "ERROR: no signed APK found:"; find src-tauri/gen/android -name '*.apk' || true; exit 1
           fi
+          SHA="$(git rev-parse --short HEAD)"
+          # Stamp build number + commit into the filename so every build is a
+          # distinct file (the phone's transfer app dedupes by name otherwise).
+          NAME="vantaloom-build${GITHUB_RUN_NUMBER}-${SHA}.apk"
+          cp "$APK" "dist/$NAME"
+          echo "Collected: dist/$NAME"; ls -la dist
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
