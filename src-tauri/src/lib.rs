@@ -191,6 +191,27 @@ async fn device_id(app: tauri::AppHandle) -> Result<String, String> {
     Ok(id)
 }
 
+/// Compile-/runtime diagnostics surfaced on-device by the connect flow. The
+/// single most important bit is `cfg_mobile`: EasyTier's in-process TUN handoff
+/// (`run_routine_for_mobile`) is gated on `#[cfg(mobile)]`, so if this is false
+/// the core can NEVER consume the VpnService fd and the data plane is dead no
+/// matter what the JS side does.
+#[derive(serde::Serialize)]
+struct MeshDiag {
+    cfg_mobile: bool,
+    cfg_android: bool,
+    easytier_version: String,
+}
+
+#[tauri::command]
+fn mesh_diag() -> MeshDiag {
+    MeshDiag {
+        cfg_mobile: cfg!(mobile),
+        cfg_android: cfg!(target_os = "android"),
+        easytier_version: easytier::VERSION.to_string(),
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let mut builder = tauri::Builder::default()
@@ -209,6 +230,7 @@ pub fn run() {
             mesh_collect_info,
             mesh_set_tun_fd,
             mesh_leave,
+            mesh_diag,
             easytier_version,
             device_id,
         ])
