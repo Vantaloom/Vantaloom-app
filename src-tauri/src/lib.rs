@@ -15,6 +15,7 @@
 
 use once_cell::sync::Lazy;
 use std::sync::Arc;
+use tauri::Manager;
 use tokio::sync::RwLock;
 
 use easytier::common::config::{ConfigFileControl, TomlConfigLoader};
@@ -171,6 +172,25 @@ fn easytier_version() -> String {
     easytier::VERSION.to_string()
 }
 
+/// Stable per-install device identifier, used by the Hub to dedup registrations
+/// across app restarts. Persisted as a plain UUID in `<app_data_dir>/device-id`;
+/// generated on first call, then read back verbatim on every subsequent launch.
+#[tauri::command]
+async fn device_id(app: tauri::AppHandle) -> Result<String, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.join("device-id");
+    if let Ok(existing) = std::fs::read_to_string(&path) {
+        let trimmed = existing.trim();
+        if !trimmed.is_empty() {
+            return Ok(trimmed.to_string());
+        }
+    }
+    let id = uuid::Uuid::new_v4().to_string();
+    std::fs::write(&path, &id).map_err(|e| e.to_string())?;
+    Ok(id)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let mut builder = tauri::Builder::default()
@@ -190,6 +210,7 @@ pub fn run() {
             mesh_set_tun_fd,
             mesh_leave,
             easytier_version,
+            device_id,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the Vantaloom control node");

@@ -64,14 +64,70 @@ jobs:
       - name: Tauri Android init (generates src-tauri/gen/android)
         run: cargo tauri android init --skip-targets-install
 
-      - name: Build APK (debug — debug-signed and installable)
-        run: cargo tauri android build --debug --apk --target ${{ env.TAURI_ANDROID_TARGET }}
+      - name: Build APK (release — stripped, size-optimized)
+        run: cargo tauri android build --apk --target ${{ env.TAURI_ANDROID_TARGET }}
+
+      - name: Ensure Android debug keystore exists
+        run: |
+          set -euo pipefail
+          KS="$HOME/.android/debug.keystore"
+          if [ ! -f "$KS" ]; then
+            echo "Creating standard Android debug keystore at $KS"
+            mkdir -p "$HOME/.android"
+            keytool -genkeypair -v \
+              -keystore "$KS" \
+              -storepass android -keypass android \
+              -alias androiddebugkey \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+          else
+            echo "Debug keystore already present at $KS"
+          fi
+
+      - name: Sign release APK with debug keystore
+        run: |
+          set -euo pipefail
+          BUILD_TOOLS="$ANDROID_SDK_ROOT/build-tools/34.0.0"
+          ZIPALIGN="$BUILD_TOOLS/zipalign"
+          APKSIGNER="$BUILD_TOOLS/apksigner"
+          echo "Using build-tools at: $BUILD_TOOLS"
+          ls -la "$BUILD_TOOLS" || true
+
+          # Locate the unsigned release APK (universal or arm64-v8a, name varies).
+          UNSIGNED="$(find src-tauri/gen/android/app/build/outputs -name '*-release-unsigned.apk' | head -n1)"
+          if [ -z "$UNSIGNED" ]; then
+            echo "ERROR: no *-release-unsigned.apk found under build outputs:"
+            find src-tauri/gen/android/app/build/outputs -name '*.apk' || true
+            exit 1
+          fi
+          echo "Unsigned release APK: $UNSIGNED"
+
+          ALIGNED="${UNSIGNED%-unsigned.apk}-aligned.apk"
+          "$ZIPALIGN" -f -p 4 "$UNSIGNED" "$ALIGNED"
+
+          # apksigner writes the signature in place on the aligned APK.
+          "$APKSIGNER" sign \
+            --ks "$HOME/.android/debug.keystore" \
+            --ks-pass pass:android \
+            --ks-key-alias androiddebugkey \
+            --key-pass pass:android \
+            "$ALIGNED"
+
+          # Surface scheme info; don't let a benign v1-compat warning fail the job.
+          "$APKSIGNER" verify --verbose "$ALIGNED" || true
+          echo "SIGNED_APK=$ALIGNED" >> "$GITHUB_ENV"
+          echo "Signed release APK: $ALIGNED"
 
       - name: Collect APKs
         run: |
+          set -euo pipefail
           mkdir -p dist
-          find src-tauri/gen/android -name '*.apk' -exec cp {} dist/ \;
+          # Copy only the signed release APK(s); never the unsigned/intermediate ones.
+          find src-tauri/gen/android -name '*-release-aligned.apk' -exec cp {} dist/ \;
           echo "Built APKs:"; ls -la dist
+          if ! ls dist/*.apk >/dev/null 2>&1; then
+            echo "ERROR: no signed APK collected into dist/"; exit 1
+          fi
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4

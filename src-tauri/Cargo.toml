@@ -44,3 +44,10 @@ tauri-plugin-single-instance = "2"
 [features]
 # Used by Tauri for production builds. DO NOT REMOVE.
 custom-protocol = ["tauri/custom-protocol"]
+
+[profile.release]
+# Shrink the release APK: strip debug symbols, optimize for size, thin LTO.
+# NOTE: no `panic = "abort"` — easytier/tauri rely on stack unwinding.
+strip = true
+opt-level = "s"
+lto = "thin"
