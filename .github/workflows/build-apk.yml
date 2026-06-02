@@ -64,6 +64,9 @@ jobs:
       - name: Tauri Android init (generates src-tauri/gen/android)
         run: cargo tauri android init --skip-targets-install
 
+      - name: Generate app icons (real Vantaloom icon → all densities/mipmaps)
+        run: cargo tauri icon app-icon.png
+
       - name: Build APK (release — stripped, size-optimized)
         run: cargo tauri android build --apk --target ${{ env.TAURI_ANDROID_TARGET }}
 
