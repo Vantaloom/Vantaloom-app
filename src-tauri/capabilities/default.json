@@ -1,0 +1,12 @@
+{
+  "$schema": "../gen/schemas/mobile-schema.json",
+  "identifier": "default",
+  "description": "Vantaloom mobile control-node capabilities.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "os:default",
+    "shell:allow-open",
+    "vpnservice:default"
+  ]
+}

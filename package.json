@@ -1,0 +1,6 @@
+{
+  "name": "vantaloom-android",
+  "version": "0.6.0",
+  "private": true,
+  "description": "Vantaloom mobile control node — Tauri shell (in-process EasyTier mesh) wrapping the prebuilt Vantaloom web UI."
+}
