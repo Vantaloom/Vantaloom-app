@@ -92,6 +92,22 @@ jobs:
           echo "=== AndroidManifest <application> tag ==="
           sed -n '/<application/,/>/p' "$MANIFEST"
 
+      - name: Register VpnService + dump Android wiring (debug)
+        run: |
+          set -euo pipefail
+          MANIFEST=src-tauri/gen/android/app/src/main/AndroidManifest.xml
+          # The plugin ships the Kotlin VpnService class but NOT a manifest <service>
+          # entry. Declare it — without this Android never lists the app as a VPN app
+          # and VpnService.prepare() shows no consent dialog (the bug we're chasing).
+          SVC='<service android:name="com.plugin.vpnservice.TauriVpnService" android:enabled="true" android:exported="false" android:permission="android.permission.BIND_VPN_SERVICE"><intent-filter><action android:name="android.net.VpnService" /></intent-filter></service>'
+          grep -q 'TauriVpnService' "$MANIFEST" || sed -i "s|</application>|${SVC}</application>|" "$MANIFEST"
+          echo "=== <service> declarations ==="; grep -o 'android:name="[^"]*Service"' "$MANIFEST" || echo "(none)"
+          echo "=== full AndroidManifest.xml ==="; cat "$MANIFEST"
+          echo "=== tauri.settings.gradle (are plugin android modules linked?) ==="
+          cat src-tauri/gen/android/tauri.settings.gradle 2>/dev/null || echo "(no tauri.settings.gradle)"
+          echo "=== app/build.gradle.kts plugin refs ==="
+          grep -iE 'vpnservice|tauri|implementation|project\(' src-tauri/gen/android/app/build.gradle.kts 2>/dev/null | head -40 || true
+
       - name: Build APK (release — stripped, size-optimized)
         run: cargo tauri android build --apk --target ${{ env.TAURI_ANDROID_TARGET }}
 
