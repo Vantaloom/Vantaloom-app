@@ -5,8 +5,14 @@
   "windows": ["main"],
   "permissions": [
     "core:default",
+    "core:event:default",
     "os:default",
     "shell:allow-open",
-    "vpnservice:default"
+    "vpnservice:allow-ping",
+    "vpnservice:allow-get-vpn-status",
+    "vpnservice:allow-prepare-vpn",
+    "vpnservice:allow-start-vpn",
+    "vpnservice:allow-stop-vpn",
+    "vpnservice:allow-registerListener"
   ]
 }

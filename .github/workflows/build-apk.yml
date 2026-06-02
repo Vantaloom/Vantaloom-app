@@ -111,22 +111,15 @@ jobs:
       - name: Build APK (release — stripped, size-optimized)
         run: cargo tauri android build --apk --target ${{ env.TAURI_ANDROID_TARGET }}
 
-      - name: Ensure Android debug keystore exists
+      - name: Use the committed stable signing keystore
         run: |
           set -euo pipefail
-          KS="$HOME/.android/debug.keystore"
-          if [ ! -f "$KS" ]; then
-            echo "Creating standard Android debug keystore at $KS"
-            mkdir -p "$HOME/.android"
-            keytool -genkeypair -v \
-              -keystore "$KS" \
-              -storepass android -keypass android \
-              -alias androiddebugkey \
-              -keyalg RSA -keysize 2048 -validity 10000 \
-              -dname "CN=Android Debug,O=Android,C=US"
-          else
-            echo "Debug keystore already present at $KS"
-          fi
+          # A FIXED keystore (committed in signing/) gives every build the SAME
+          # signature, so the app updates in place instead of failing with a
+          # "signatures do not match" error from a fresh per-build key.
+          mkdir -p "$HOME/.android"
+          cp signing/vantaloom.keystore "$HOME/.android/debug.keystore"
+          echo "Using committed stable keystore (alias androiddebugkey)."
 
       - name: Sign release APK with debug keystore
         run: |
