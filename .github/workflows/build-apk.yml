@@ -21,14 +21,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install protoc (EasyTier build dependency)
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Install protoc + build tools (EasyTier build deps)
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler build-essential
 
-      - name: Set up JDK 17
+      - name: Set up JDK 21
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: "21"
 
       - name: Set up Rust (+ android target)
         uses: dtolnay/rust-toolchain@stable
@@ -45,10 +45,17 @@ jobs:
 
       - name: Install Android NDK + platform
         run: |
-          sdkmanager "ndk;26.1.10909125" "platform-tools" "platforms;android-34" "build-tools;34.0.0"
-          echo "NDK_HOME=$ANDROID_SDK_ROOT/ndk/26.1.10909125" >> "$GITHUB_ENV"
-          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/26.1.10909125" >> "$GITHUB_ENV"
-          echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/26.1.10909125" >> "$GITHUB_ENV"
+          NDK_VER=26.0.10792818
+          sdkmanager "ndk;$NDK_VER" "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+          NDK_DIR="$ANDROID_SDK_ROOT/ndk/$NDK_VER"
+          echo "NDK_HOME=$NDK_DIR" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$NDK_DIR" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$NDK_DIR" >> "$GITHUB_ENV"
+          # KEY FIX: prepend the NDK LLVM toolchain to PATH so the `cc` crate and
+          # bindgen use the Android clang (with its built-in sysroot) instead of
+          # host clang. Without this, kcp-sys's bindgen reads host /usr/include
+          # and dies on bits/libc-header-start.h. (Matches EasyTier mobile.yml.)
+          echo "$NDK_DIR/toolchains/llvm/prebuilt/linux-x86_64/bin" >> "$GITHUB_PATH"
 
       - name: Install Tauri CLI
         uses: cargo-bins/cargo-binstall@main
