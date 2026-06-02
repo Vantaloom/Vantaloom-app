@@ -37,6 +37,13 @@ tokio = { version = "1", features = ["full"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 log = "0.4"
 
+[target.'cfg(target_os = "android")'.dependencies]
+# Read Settings.Secure.ANDROID_ID over JNI for a reinstall-stable device id.
+# jni 0.21 matches the version Tauri/EasyTier use on Android; ndk-context hands
+# us the JavaVM + Activity pointers set up by the mobile entry point.
+jni = "0.21"
+ndk-context = "0.1"
+
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 # Desktop dev builds only (handy for iterating on the UI without a device).
 tauri-plugin-single-instance = "2"

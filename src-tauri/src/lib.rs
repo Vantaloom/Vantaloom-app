@@ -167,25 +167,126 @@ async fn mesh_leave(instance_id: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether a mesh instance is currently live IN THIS PROCESS. False after a cold
+/// start / process kill (the static manager is empty), true after a mere WebView
+/// reload (the native instance survives). The frontend uses this to drop a
+/// stale, persisted runtime target and return to the connect screen instead of
+/// driving a dead tunnel. Reads the static directly so it never spins up a
+/// manager as a side effect.
+#[tauri::command]
+async fn mesh_active() -> bool {
+    let g = MANAGER.read().await;
+    match g.as_ref() {
+        Some(m) => !m.list_network_instance_ids().is_empty(),
+        None => false,
+    }
+}
+
 #[tauri::command]
 fn easytier_version() -> String {
     easytier::VERSION.to_string()
 }
 
-/// Stable per-install device identifier, used by the Hub to dedup registrations
-/// across app restarts. Persisted as a plain UUID in `<app_data_dir>/device-id`;
-/// generated on first call, then read back verbatim on every subsequent launch.
+/// The Android SSAID (`Settings.Secure.ANDROID_ID`). Unlike a file in app data,
+/// it SURVIVES uninstall/reinstall as long as the signing key is unchanged — and
+/// our APKs use a fixed committed keystore, so it is stable for the life of the
+/// device. Returns None on non-Android, when the value is missing, or the known
+/// buggy constant some old devices report.
+///
+/// The whole JNI attempt is wrapped in catch_unwind: if the ndk context isn't
+/// initialised, `android_context()` panics — we swallow it and fall back rather
+/// than crash the command.
+#[cfg(target_os = "android")]
+fn android_ssaid() -> Option<String> {
+    std::panic::catch_unwind(android_ssaid_inner)
+        .ok()
+        .flatten()
+}
+
+#[cfg(target_os = "android")]
+fn android_ssaid_inner() -> Option<String> {
+    use jni::objects::{JObject, JString, JValue};
+
+    let ctx = ndk_context::android_context();
+    if ctx.vm().is_null() || ctx.context().is_null() {
+        return None;
+    }
+    let vm = unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) }.ok()?;
+    let mut env = vm.attach_current_thread().ok()?;
+    let context = unsafe { JObject::from_raw(ctx.context().cast()) };
+
+    // resolver = context.getContentResolver()
+    let resolver = env
+        .call_method(
+            &context,
+            "getContentResolver",
+            "()Landroid/content/ContentResolver;",
+            &[],
+        )
+        .ok()?
+        .l()
+        .ok()?;
+
+    // Settings.Secure.getString(resolver, "android_id").
+    // Pass args as explicit JValue::Object; &JString coerces to &JObject via
+    // Deref, which avoids relying on a From<&JString> impl.
+    let key = env.new_string("android_id").ok()?;
+    let key_obj: &JObject = &key;
+    let class = env.find_class("android/provider/Settings$Secure").ok()?;
+    let value = env
+        .call_static_method(
+            class,
+            "getString",
+            "(Landroid/content/ContentResolver;Ljava/lang/String;)Ljava/lang/String;",
+            &[JValue::Object(&resolver), JValue::Object(key_obj)],
+        )
+        .ok()?
+        .l()
+        .ok()?;
+
+    if value.is_null() {
+        return None;
+    }
+    let jstr = unsafe { JString::from_raw(value.into_raw()) };
+    let s = env.get_string(&jstr).ok()?;
+    let s = s.to_str().ok()?.trim().to_string();
+    // 9774d56d682e549c is a notorious non-unique value on some old/rooted devices.
+    if s.is_empty() || s == "9774d56d682e549c" {
+        None
+    } else {
+        Some(s)
+    }
+}
+
+/// Stable per-device identifier the Hub uses to dedup registrations. Resolution
+/// order: (1) a value cached in `<app_data_dir>/device-id` — stable within an
+/// install; (2) on Android, the hardware SSAID, which survives reinstall thanks
+/// to our fixed signing key (then cached so it never drifts); (3) a persisted
+/// random UUID fallback (non-Android, or SSAID unavailable).
 #[tauri::command]
 async fn device_id(app: tauri::AppHandle) -> Result<String, String> {
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let path = dir.join("device-id");
+
     if let Ok(existing) = std::fs::read_to_string(&path) {
         let trimmed = existing.trim();
         if !trimmed.is_empty() {
             return Ok(trimmed.to_string());
         }
     }
+
+    #[cfg(target_os = "android")]
+    {
+        if let Some(ssaid) = android_ssaid() {
+            let id = format!("android-{ssaid}");
+            // Best-effort cache; even if the write fails we still return the
+            // SSAID, which is itself stable, so the id stays consistent.
+            let _ = std::fs::write(&path, &id);
+            return Ok(id);
+        }
+    }
+
     let id = uuid::Uuid::new_v4().to_string();
     std::fs::write(&path, &id).map_err(|e| e.to_string())?;
     Ok(id)
@@ -230,6 +331,7 @@ pub fn run() {
             mesh_collect_info,
             mesh_set_tun_fd,
             mesh_leave,
+            mesh_active,
             mesh_diag,
             easytier_version,
             device_id,
