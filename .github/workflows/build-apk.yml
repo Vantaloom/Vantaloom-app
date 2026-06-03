@@ -15,6 +15,8 @@ jobs:
   build-apk:
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    permissions:
+      contents: write # tag + create a release and upload the APK as a permanent asset
     env:
       # arm64 covers essentially every real phone; add more targets later.
       TAURI_ANDROID_TARGET: aarch64
@@ -177,3 +179,22 @@ jobs:
           name: vantaloom-android-apk
           path: dist/*.apk
           if-no-files-found: error
+
+      - name: Publish APK to a GitHub Release (permanent download)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # A fresh tag + Release per build so the signed APK is a PERMANENT
+          # download (Actions artifacts expire after a few weeks). The committed
+          # stable keystore means every build shares a signature, so the APK
+          # installs in place over the previous one (no uninstall needed).
+          SHA="$(git rev-parse --short HEAD)"
+          TAG="apk-build${GITHUB_RUN_NUMBER}-${SHA}"
+          APK="$(find dist -name '*.apk' | head -n1)"
+          if [ -z "$APK" ]; then echo "ERROR: no APK to release"; exit 1; fi
+          gh release create "$TAG" "$APK" \
+            --title "Vantaloom Android · build ${GITHUB_RUN_NUMBER} (${SHA})" \
+            --notes "Automated APK from ${SHA}. Install over any previous build (shared signing key — no uninstall needed)." \
+            --latest
+          echo "Released $TAG → $(basename "$APK")"
