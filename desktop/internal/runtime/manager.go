@@ -111,7 +111,13 @@ func DefaultPrefix() string {
 	}
 	switch runtime.GOOS {
 	case "windows":
-		return `D:\Vantaloom`
+		// Prefer D: (the historical default) but fall back to C: when this
+		// machine has no D: drive. Must stay in sync with the CLI's
+		// defaultPrefix() so the shell and CLI agree on the location.
+		if _, err := os.Stat(`D:\`); err == nil {
+			return `D:\Vantaloom`
+		}
+		return `C:\Vantaloom`
 	case "darwin":
 		home, _ := os.UserHomeDir()
 		return filepath.Join(home, "Applications", "Vantaloom")
