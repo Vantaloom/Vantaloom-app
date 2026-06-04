@@ -1,0 +1,149 @@
+name: Build Desktop
+
+# Builds the Vantaloom desktop shell (Wails) for Windows + macOS and publishes
+# the installers to a GitHub Release. The shell is a thin launcher: it detects /
+# installs / updates / starts the local backend (which ships separately via npm)
+# and wraps the local web app — so no proprietary core lives here.
+#
+# Triggered only when the desktop source changes (not on every frontend sync),
+# or manually.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "desktop/**"
+      - ".github/workflows/build-desktop.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: build-desktop-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write # create a release + upload installers as permanent assets
+
+jobs:
+  build:
+    name: Build (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-amd64
+            os: windows-latest
+          - name: macos-universal
+            os: macos-latest
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: desktop/go.mod
+          cache-dependency-path: desktop/go.sum
+
+      - name: Install Wails CLI
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.12.0
+
+      # ── Windows: NSIS installer (+ portable zip) ──
+      - name: Install NSIS
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install nsis -y --no-progress
+          echo "C:\Program Files (x86)\NSIS" >> $env:GITHUB_PATH
+
+      - name: Build Windows installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          wails build -platform windows/amd64 -nsis -clean
+          if (Test-Path build/bin/Vantaloom.exe) {
+            Compress-Archive -Path build/bin/Vantaloom.exe -DestinationPath build/bin/Vantaloom-windows-amd64-portable.zip -Force
+          }
+          Get-ChildItem build/bin
+
+      # ── macOS: universal .app → ad-hoc-signed DMG ──
+      - name: Build macOS app + DMG
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          wails build -platform darwin/universal -clean
+          APP="build/bin/Vantaloom.app"
+          # Ad-hoc sign so the app launches after the user clears quarantine.
+          # (No Apple Developer cert → not notarized; users right-click → Open.)
+          codesign --force --deep --sign - "$APP"
+          hdiutil create -volname "Vantaloom" -srcfolder "$APP" -ov -format UDZO "build/bin/Vantaloom.dmg"
+          ls -la build/bin
+
+      - name: Upload installer artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ matrix.name }}
+          path: |
+            desktop/build/bin/*-installer.exe
+            desktop/build/bin/*-portable.zip
+            desktop/build/bin/*.dmg
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Collect + stamp installers
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          SHA="$(git rev-parse --short HEAD)"
+          # Stamp build number + commit into each filename so every build is a
+          # distinct, permanent download.
+          WIN_SETUP="$(find artifacts -name '*-installer.exe' | head -n1 || true)"
+          WIN_ZIP="$(find artifacts -name '*-portable.zip' | head -n1 || true)"
+          MAC_DMG="$(find artifacts -name '*.dmg' | head -n1 || true)"
+          if [ -n "$WIN_SETUP" ]; then cp "$WIN_SETUP" "dist/Vantaloom-windows-amd64-setup-build${GITHUB_RUN_NUMBER}-${SHA}.exe"; fi
+          if [ -n "$WIN_ZIP" ];   then cp "$WIN_ZIP"   "dist/Vantaloom-windows-amd64-portable-build${GITHUB_RUN_NUMBER}-${SHA}.zip"; fi
+          if [ -n "$MAC_DMG" ];   then cp "$MAC_DMG"   "dist/Vantaloom-macos-universal-build${GITHUB_RUN_NUMBER}-${SHA}.dmg"; fi
+          echo "SHA=$SHA" >> "$GITHUB_ENV"
+          ls -la dist
+
+      - name: Write release notes
+        run: |
+          set -euo pipefail
+          : > notes.md
+          echo '桌面外壳安装包（Windows + macOS）。' >> notes.md
+          echo '' >> notes.md
+          echo '本壳只负责：检测本机 Vantaloom 安装状态 → 没安装自动安装核心后端 → 有更新自动更新 → 没启动自动启动，并封装本地 Web 应用。后端核心通过 npm 自动安装/更新。' >> notes.md
+          echo '' >> notes.md
+          echo '- Windows：运行 `*-setup-*.exe` 安装（或解压 `*-portable.zip` 直接运行）。未做代码签名，SmartScreen 可能提示，选择"更多信息 → 仍要运行"。' >> notes.md
+          echo '- macOS：打开 DMG，将 Vantaloom 拖入"应用程序"。未做公证，首次启动请右键 → 打开（或执行 `xattr -dr com.apple.quarantine /Applications/Vantaloom.app`）。' >> notes.md
+          cat notes.md
+
+      - name: Publish to a GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="desktop-build${GITHUB_RUN_NUMBER}-${SHA}"
+          if [ -z "$(ls -A dist 2>/dev/null)" ]; then echo "ERROR: no installers to release"; exit 1; fi
+          # --latest=false leaves the APK as the repo's "Latest" badge; desktop
+          # releases are found by their desktop-* tag.
+          gh release create "$TAG" dist/* \
+            --title "Vantaloom Desktop · build ${GITHUB_RUN_NUMBER} (${SHA})" \
+            --notes-file notes.md \
+            --latest=false
+          echo "Released $TAG"

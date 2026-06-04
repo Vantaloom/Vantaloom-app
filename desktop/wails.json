@@ -1,0 +1,18 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "vantaloom",
+  "outputfilename": "Vantaloom",
+  "frontend:install": "",
+  "frontend:build": "",
+  "frontend:dev:watcher": "",
+  "frontend:dev:serverUrl": "",
+  "author": {
+    "name": "Vantaloom"
+  },
+  "info": {
+    "companyName": "Vantaloom",
+    "productName": "Vantaloom",
+    "productVersion": "0.1.0",
+    "comments": "Vantaloom 桌面外壳：自动检测/安装/更新/启动本地核心服务，并封装本地 Web 应用。"
+  }
+}
