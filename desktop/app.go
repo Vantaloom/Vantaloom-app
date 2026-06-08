@@ -59,6 +59,16 @@ func (a *App) Bootstrap() (string, error) {
 	ctx, cancel := context.WithTimeout(a.ctx, 12*time.Minute)
 	defer cancel()
 
+	// Ensure a usable Node.js exists before booting the runtime: the launcher
+	// scripts and ACP adapters shell out to the system `node`. Auto-installs a
+	// pinned LTS from a China mirror if absent. Non-fatal — boot proceeds with
+	// whatever node may already be present on failure.
+	nodeCtx, cancelNode := context.WithTimeout(ctx, 3*time.Minute)
+	if _, err := rt.EnsureNode(nodeCtx); err != nil {
+		fmt.Printf("[desktop] Node.js 检测/安装失败（继续启动）: %v\n", err)
+	}
+	cancelNode()
+
 	st := a.mgr.Status(ctx)
 
 	// Already up — hand straight off to the live app. (We don't hot-update a
