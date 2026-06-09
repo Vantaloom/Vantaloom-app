@@ -71,47 +71,92 @@ func (a *App) Bootstrap() (string, error) {
 
 	st := a.mgr.Status(ctx)
 
-	// Already up — hand straight off to the live app. (We don't hot-update a
-	// running backend out from under an active session; updates land on the
-	// next cold start.)
 	if st.Running {
-		emit("ready", "后端已在运行", 100)
-		return a.mgr.BackendURL(), nil
-	}
-
-	switch {
-	case !st.Installed:
-		emit("install", "首次运行：正在安装 Vantaloom 核心服务…", 0)
-		if _, err := a.mgr.Install(ctx, "latest", func(p rt.Progress) {
-			wruntime.EventsEmit(a.ctx, bootEvent, p)
-		}); err != nil {
-			return "", err
-		}
-
-	default:
-		// Installed but stopped. Try an auto-update, but cap the registry check
-		// so an offline launch falls back quickly to the installed version.
+		// Backend already up. We never silently hot-update a running backend (an
+		// active agent session would be killed mid-run) — but we also don't
+		// silently skip. If a newer version is reachable, ASK the user: they know
+		// whether an agent is currently running. If one is, they defer to the next
+		// open; if not, they can stop + update + restart right now.
 		emit("check", "正在检查更新…", 1)
 		checkCtx, cancelCheck := context.WithTimeout(ctx, 6*time.Second)
 		available, latest, checkErr := a.mgr.UpdateAvailable(checkCtx)
 		cancelCheck()
 
-		if checkErr == nil && available {
-			emit("update", fmt.Sprintf("发现新版本 %s，正在更新…", latest), 2)
+		if checkErr != nil || !available {
+			// No update (or offline) — hand straight off to the live app.
+			emit("ready", "后端已在运行", 100)
+			return a.mgr.BackendURL(), nil
+		}
+
+		choice, _ := wruntime.MessageDialog(a.ctx, wruntime.MessageDialogOptions{
+			Type:    wruntime.QuestionDialog,
+			Title:   "发现新版本 " + latest,
+			Message: "Vantaloom 仍在运行。请先确认当前是否有 agent 正在运行：\n\n" +
+				"• 有正在运行的 agent → 选择「忽略本次更新」，本次跳过，更新留到下次打开。\n" +
+				"• 没有 agent 在运行 → 选择「结束并更新」，将先停止当前服务，更新后自动重启。",
+			Buttons:       []string{"忽略本次更新", "结束并更新"},
+			DefaultButton: "忽略本次更新",
+			CancelButton:  "忽略本次更新",
+		})
+		if choice != "结束并更新" {
+			emit("ready", "后端已在运行（本次跳过更新）", 100)
+			return a.mgr.BackendURL(), nil
+		}
+
+		// User confirmed no agent is running: stop the runtime, then update.
+		emit("update", "正在停止当前服务…", 2)
+		if err := a.mgr.Stop(ctx); err != nil {
+			// Can't stop cleanly — don't strand the user; hand off to the running app.
+			emit("ready", "无法停止当前服务，已跳过本次更新", 100)
+			return a.mgr.BackendURL(), nil
+		}
+		emit("update", fmt.Sprintf("正在更新到 %s…", latest), 3)
+		if _, err := a.mgr.Install(ctx, "latest", func(p rt.Progress) {
+			wruntime.EventsEmit(a.ctx, bootEvent, p)
+		}); err != nil {
+			// Update failed after stopping — start what's already installed so the
+			// user isn't left with a stopped backend.
+			emit("start", "更新未完成，正在启动已安装版本…", 88)
+			if e := a.mgr.Start(ctx); e != nil {
+				return "", e
+			}
+		}
+		// Install() starts the runtime; fall through to the shared health wait.
+	} else {
+		switch {
+		case !st.Installed:
+			emit("install", "首次运行：正在安装 Vantaloom 核心服务…", 0)
 			if _, err := a.mgr.Install(ctx, "latest", func(p rt.Progress) {
 				wruntime.EventsEmit(a.ctx, bootEvent, p)
 			}); err != nil {
-				// Update failed mid-flight — don't strand the user; start what's
-				// already installed.
-				emit("start", "更新未完成，正在启动已安装版本…", 88)
-				if e := a.mgr.Start(ctx); e != nil {
-					return "", e
-				}
-			}
-		} else {
-			emit("start", "正在启动后端服务…", 88)
-			if err := a.mgr.Start(ctx); err != nil {
 				return "", err
+			}
+
+		default:
+			// Installed but stopped. Try an auto-update, but cap the registry check
+			// so an offline launch falls back quickly to the installed version.
+			emit("check", "正在检查更新…", 1)
+			checkCtx, cancelCheck := context.WithTimeout(ctx, 6*time.Second)
+			available, latest, checkErr := a.mgr.UpdateAvailable(checkCtx)
+			cancelCheck()
+
+			if checkErr == nil && available {
+				emit("update", fmt.Sprintf("发现新版本 %s，正在更新…", latest), 2)
+				if _, err := a.mgr.Install(ctx, "latest", func(p rt.Progress) {
+					wruntime.EventsEmit(a.ctx, bootEvent, p)
+				}); err != nil {
+					// Update failed mid-flight — don't strand the user; start what's
+					// already installed.
+					emit("start", "更新未完成，正在启动已安装版本…", 88)
+					if e := a.mgr.Start(ctx); e != nil {
+						return "", e
+					}
+				}
+			} else {
+				emit("start", "正在启动后端服务…", 88)
+				if err := a.mgr.Start(ctx); err != nil {
+					return "", err
+				}
 			}
 		}
 	}
