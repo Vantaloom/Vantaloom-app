@@ -28,6 +28,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"vantaloom.local/apps/desktop/internal/winproc"
 )
 
 const (
@@ -487,6 +489,7 @@ func (m *Manager) WaitHealthy(ctx context.Context, timeout time.Duration) error 
 
 func (m *Manager) runCtl(ctx context.Context, args ...string) error {
 	cmd := exec.CommandContext(ctx, m.ctlPath(), args...)
+	winproc.Hide(cmd)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("vantaloomctl %s: %v\n%s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
@@ -498,7 +501,9 @@ func (m *Manager) runCtl(ctx context.Context, args ...string) error {
 // trays don't write a pid that vantaloomctl stop can find). Best-effort.
 func (m *Manager) killTray() {
 	if runtime.GOOS != "windows" {
-		_ = exec.Command("pkill", "-f", "vantaloom-tray").Run()
+		kill := exec.Command("pkill", "-f", "vantaloom-tray")
+		winproc.Hide(kill) // no-op on non-windows
+		_ = kill.Run()
 		return
 	}
 	pidFile := filepath.Join(m.Prefix, "runtime", "tray.pid")
@@ -507,7 +512,9 @@ func (m *Manager) killTray() {
 		return
 	}
 	if pid := strings.TrimSpace(string(b)); pid != "" {
-		_ = exec.Command("taskkill", "/PID", pid, "/F").Run()
+		kill := exec.Command("taskkill", "/PID", pid, "/F")
+		winproc.Hide(kill)
+		_ = kill.Run()
 		_ = os.Remove(pidFile)
 	}
 }

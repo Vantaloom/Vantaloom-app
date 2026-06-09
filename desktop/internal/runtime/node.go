@@ -32,6 +32,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"vantaloom.local/apps/desktop/internal/winproc"
 )
 
 // nodeVersion is the pinned LTS we install. Pinning avoids parsing a "latest"
@@ -388,13 +390,16 @@ func persistNodePathWindows(nodeDir string) {
 		merged = strings.TrimRight(existing, ";") + ";" + nodeDir
 	}
 	cmd := exec.Command("reg", "add", `HKCU\Environment`, "/v", "Path", "/t", "REG_EXPAND_SZ", "/d", merged, "/f")
+	winproc.Hide(cmd)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		log.Printf("[node] 写入用户 PATH 失败: %v\n%s", err, strings.TrimSpace(string(out)))
 	}
 }
 
 func readUserNodePathWindows() string {
-	out, err := exec.Command("reg", "query", `HKCU\Environment`, "/v", "Path").CombinedOutput()
+	cmd := exec.Command("reg", "query", `HKCU\Environment`, "/v", "Path")
+	winproc.Hide(cmd)
+	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return ""
 	}
