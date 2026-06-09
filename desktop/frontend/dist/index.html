@@ -151,6 +151,37 @@
         white-space: pre-wrap;
       }
       pre.log.show { display: block; }
+
+      .modal-overlay {
+        position: fixed;
+        inset: 0;
+        display: none;
+        align-items: center;
+        justify-content: center;
+        padding: 20px;
+        background: rgba(0, 0, 0, 0.55);
+        -webkit-backdrop-filter: blur(3px);
+        backdrop-filter: blur(3px);
+        z-index: 50;
+      }
+      .modal-overlay.show { display: flex; }
+      .modal {
+        width: min(460px, 90vw);
+        text-align: left;
+        padding: 22px 22px 18px;
+        border-radius: 16px;
+        background: var(--graphite);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        box-shadow: 0 24px 70px rgba(0, 0, 0, 0.55);
+      }
+      .modal h2 { font-size: 17px; font-weight: 650; margin: 0 0 12px; }
+      .modal .modal-body {
+        font-size: 13px;
+        color: var(--ash);
+        line-height: 1.7;
+        margin: 0 0 20px;
+      }
+      .modal-actions { display: flex; gap: 10px; justify-content: flex-end; }
     </style>
   </head>
   <body>
@@ -173,6 +204,21 @@
       <pre class="log" id="log"></pre>
     </main>
 
+    <div class="modal-overlay" id="updateModal">
+      <div class="modal">
+        <h2 id="updateTitle">发现新版本</h2>
+        <p class="modal-body">
+          Vantaloom 仍在运行。请先确认当前是否有 agent 正在运行：<br />
+          • 有正在运行的 agent → 选「忽略本次更新」，本次跳过，更新留到下次打开。<br />
+          • 没有 agent 在运行 → 选「结束并更新」，将先停止当前服务，更新后自动重启。
+        </p>
+        <div class="modal-actions">
+          <button id="updateSkip">忽略本次更新</button>
+          <button class="primary" id="updateProceed">结束并更新</button>
+        </div>
+      </div>
+    </div>
+
     <script>
       const $ = (id) => document.getElementById(id);
       const statusEl = $("status");
@@ -183,7 +229,23 @@
       const actions = $("actions");
       const logEl = $("log");
 
+      const updateModal = $("updateModal");
+
       let targetURL = "";
+
+      function showUpdateModal(latest) {
+        $("updateTitle").textContent = latest
+          ? "发现新版本 " + latest
+          : "发现新版本";
+        updateModal.classList.add("show");
+      }
+      function answerUpdate(proceed) {
+        updateModal.classList.remove("show");
+        if (window.go && window.go.main && window.go.main.App) {
+          window.go.main.App.AnswerUpdatePrompt(proceed);
+        }
+        setStatus(proceed ? "正在结束并更新…" : "正在进入…");
+      }
 
       function setStatus(msg) { statusEl.textContent = msg || ""; }
       function setProgress(p) {
@@ -242,6 +304,9 @@
           showError(e.message);
           return;
         }
+        // Register event listeners (incl. the update-prompt modal) BEFORE
+        // Bootstrap runs, so an emitted prompt is never missed.
+        subscribe();
         try {
           targetURL = await window.go.main.App.Bootstrap();
           setStatus("就绪，正在进入…");
@@ -254,13 +319,20 @@
       }
 
       // Live progress from the Go backend bootstrap.
+      let subscribed = false;
       function subscribe() {
+        if (subscribed) return;
         if (!window.runtime || !window.runtime.EventsOn) return;
+        subscribed = true;
         window.runtime.EventsOn("vantaloom:boot", (p) => {
           if (!p) return;
           if (p.message) setStatus(p.message);
           if (typeof p.percent === "number") setProgress(p.percent);
           appendLog(p.phase, p.message || "");
+        });
+        // The runtime is up and an update is available — show the in-page modal.
+        window.runtime.EventsOn("vantaloom:update-prompt", (p) => {
+          showUpdateModal(p && p.latest);
         });
       }
 
@@ -274,10 +346,11 @@
         const open = logEl.classList.toggle("show");
         $("logToggle").textContent = open ? "隐藏详细日志" : "显示详细日志";
       });
+      $("updateSkip").addEventListener("click", () => answerUpdate(false));
+      $("updateProceed").addEventListener("click", () => answerUpdate(true));
 
-      // Wails injects bindings before the page is interactive, but subscribe as
-      // soon as possible and kick off the boot sequence.
-      waitForWails().then(subscribe).catch(() => {});
+      // boot() registers the event listeners (subscribe) before calling
+      // Bootstrap, so the update-prompt event is never missed.
       window.addEventListener("DOMContentLoaded", boot);
     </script>
   </body>

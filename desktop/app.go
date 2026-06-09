@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	wruntime "github.com/wailsapp/wails/v2/pkg/runtime"
@@ -13,11 +14,22 @@ import (
 // bootEvent is the event name the splash frontend listens on for live progress.
 const bootEvent = "vantaloom:boot"
 
+// updatePromptEvent asks the splash to show the in-page update modal. We use an
+// HTML modal (not wruntime.MessageDialog) because the native Windows dialog only
+// offers yes/no and ignores custom button labels, so the user's choice was
+// effectively lost ("选啥都没用").
+const updatePromptEvent = "vantaloom:update-prompt"
+
 // App is the Wails-bound application object. Its exported methods are callable
 // from the splash UI as window.go.main.App.<Method>().
 type App struct {
 	ctx context.Context
 	mgr *rt.Manager
+
+	// updateAnswer carries the user's choice from the in-page update modal back
+	// to a blocked Bootstrap. Guarded by updateMu (a fresh channel per prompt).
+	updateMu     sync.Mutex
+	updateAnswer chan bool
 }
 
 // NewApp builds the App with a runtime Manager bound to the default install
@@ -88,17 +100,8 @@ func (a *App) Bootstrap() (string, error) {
 			return a.mgr.BackendURL(), nil
 		}
 
-		choice, _ := wruntime.MessageDialog(a.ctx, wruntime.MessageDialogOptions{
-			Type:    wruntime.QuestionDialog,
-			Title:   "发现新版本 " + latest,
-			Message: "Vantaloom 仍在运行。请先确认当前是否有 agent 正在运行：\n\n" +
-				"• 有正在运行的 agent → 选择「忽略本次更新」，本次跳过，更新留到下次打开。\n" +
-				"• 没有 agent 在运行 → 选择「结束并更新」，将先停止当前服务，更新后自动重启。",
-			Buttons:       []string{"忽略本次更新", "结束并更新"},
-			DefaultButton: "忽略本次更新",
-			CancelButton:  "忽略本次更新",
-		})
-		if choice != "结束并更新" {
+		// Ask via an in-page modal rendered by the splash (see updatePromptEvent).
+		if !a.askUpdatePrompt(ctx, latest) {
 			emit("ready", "后端已在运行（本次跳过更新）", 100)
 			return a.mgr.BackendURL(), nil
 		}
@@ -167,4 +170,47 @@ func (a *App) Bootstrap() (string, error) {
 	}
 	emit("ready", "就绪", 100)
 	return a.mgr.BackendURL(), nil
+}
+
+// askUpdatePrompt asks the splash to render the in-page update modal and blocks
+// until the user answers via AnswerUpdatePrompt — true = stop+update+restart,
+// false = skip this launch. A done context or a generous timeout defaults to
+// skipping so a dismissed/stuck modal never strands the user.
+func (a *App) askUpdatePrompt(ctx context.Context, latest string) bool {
+	ch := make(chan bool, 1)
+	a.updateMu.Lock()
+	a.updateAnswer = ch
+	a.updateMu.Unlock()
+	defer func() {
+		a.updateMu.Lock()
+		a.updateAnswer = nil
+		a.updateMu.Unlock()
+	}()
+
+	wruntime.EventsEmit(a.ctx, updatePromptEvent, map[string]any{"latest": latest})
+
+	select {
+	case proceed := <-ch:
+		return proceed
+	case <-ctx.Done():
+		return false
+	case <-time.After(10 * time.Minute):
+		return false
+	}
+}
+
+// AnswerUpdatePrompt is invoked from the splash modal with the user's choice:
+// true = 结束并更新 (stop + update + restart now), false = 忽略本次更新 (skip).
+// Bound to the UI as window.go.main.App.AnswerUpdatePrompt(bool).
+func (a *App) AnswerUpdatePrompt(proceed bool) {
+	a.updateMu.Lock()
+	ch := a.updateAnswer
+	a.updateMu.Unlock()
+	if ch == nil {
+		return
+	}
+	select {
+	case ch <- proceed:
+	default:
+	}
 }
