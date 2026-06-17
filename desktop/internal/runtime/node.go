@@ -371,28 +371,44 @@ func persistNodePath(nodeDir string) {
 		return
 	}
 	if runtime.GOOS == "windows" {
-		persistNodePathWindows(nodeDir)
+		persistDirOnUserPathWindows(nodeDir)
 		return
 	}
-	persistNodePathUnix(nodeDir)
+	persistDirOnUserPathUnixLabeled(nodeDir, "Node.js")
 }
 
-// persistNodePathWindows updates HKCU\Environment Path via reg.exe. We avoid
-// `setx PATH` (truncates at 1024 chars and corrupts PATH by flattening the
-// merged REG_EXPAND_SZ into a literal REG_SZ).
-func persistNodePathWindows(nodeDir string) {
-	existing := readUserNodePathWindows()
-	if nodePathContains(existing, nodeDir) {
+// persistDirOnUserPath records dir on the USER-level PATH (HKCU on Windows,
+// shell profiles on unix). Best-effort, non-fatal, idempotent. Generalized from
+// the node-install path persistence so other install steps (e.g. putting the
+// Vantaloom prefix on PATH) can reuse the same battle-tested, unprivileged
+// mechanism — see ensureInPath in manager.go.
+func persistDirOnUserPath(dir string) {
+	if dir == "" {
 		return
 	}
-	merged := nodeDir
+	if runtime.GOOS == "windows" {
+		persistDirOnUserPathWindows(dir)
+		return
+	}
+	persistDirOnUserPathUnix(dir)
+}
+
+// persistDirOnUserPathWindows updates HKCU\Environment Path via reg.exe. We avoid
+// `setx PATH` (truncates at 1024 chars and corrupts PATH by flattening the
+// merged REG_EXPAND_SZ into a literal REG_SZ).
+func persistDirOnUserPathWindows(dir string) {
+	existing := readUserNodePathWindows()
+	if nodePathContains(existing, dir) {
+		return
+	}
+	merged := dir
 	if strings.TrimSpace(existing) != "" {
-		merged = strings.TrimRight(existing, ";") + ";" + nodeDir
+		merged = strings.TrimRight(existing, ";") + ";" + dir
 	}
 	cmd := exec.Command("reg", "add", `HKCU\Environment`, "/v", "Path", "/t", "REG_EXPAND_SZ", "/d", merged, "/f")
 	winproc.Hide(cmd)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		log.Printf("[node] 写入用户 PATH 失败: %v\n%s", err, strings.TrimSpace(string(out)))
+		log.Printf("[path] 写入用户 PATH 失败: %v\n%s", err, strings.TrimSpace(string(out)))
 	}
 }
 
@@ -416,7 +432,11 @@ func readUserNodePathWindows() string {
 	return ""
 }
 
-func persistNodePathUnix(nodeDir string) {
+func persistDirOnUserPathUnix(dir string) {
+	persistDirOnUserPathUnixLabeled(dir, "")
+}
+
+func persistDirOnUserPathUnixLabeled(dir, label string) {
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
 		return
@@ -427,11 +447,15 @@ func persistNodePathUnix(nodeDir string) {
 	} else {
 		profiles = []string{filepath.Join(home, ".bashrc"), filepath.Join(home, ".profile")}
 	}
-	line := fmt.Sprintf("export PATH=\"%s:$PATH\"", nodeDir)
-	block := fmt.Sprintf("\n# Added by Vantaloom (Node.js)\n%s\n", line)
+	comment := "# Added by Vantaloom"
+	if label != "" {
+		comment = fmt.Sprintf("# Added by Vantaloom (%s)", label)
+	}
+	line := fmt.Sprintf("export PATH=\"%s:$PATH\"", dir)
+	block := fmt.Sprintf("\n%s\n%s\n", comment, line)
 	for _, prof := range profiles {
 		if data, err := os.ReadFile(prof); err == nil {
-			if strings.Contains(string(data), nodeDir) {
+			if strings.Contains(string(data), dir) {
 				continue
 			}
 		}

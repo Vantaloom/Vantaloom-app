@@ -355,6 +355,14 @@ func (m *Manager) Install(ctx context.Context, version string, progress func(Pro
 		return "", fmt.Errorf("注册服务失败: %w", err)
 	}
 
+	// Register/start the privileged EasyTier (P2P) sidecar — the one elevation
+	// the desktop install needs (vantaloomctl install only spawns api/agent/web).
+	// Gated so an unchanged mesh is a no-op (no UAC on routine updates), and
+	// non-fatal: on failure P2P falls back to the Hub relay. Mirrors the CLI's
+	// ensureMeshService.
+	report("mesh", "正在注册 P2P 网络服务…", 86)
+	m.ensureMeshService(ctx)
+
 	report("start", "正在启动后端服务…", 90)
 	if err := m.runCtl(ctx, "start", "--prefix", m.Prefix); err != nil {
 		return "", fmt.Errorf("启动后端失败: %w", err)
@@ -428,10 +436,26 @@ func (m *Manager) layDown(ctx context.Context, pkgRoot, ver string, res resolved
 	}
 	m.writeConfig(res)
 
+	// Put <prefix> on the user-level PATH so the `vantaloom` launcher (written by
+	// writeLauncher) is actually invocable as a bare command — the CLI install
+	// does this via ensureInPath + the npm-global shim, which the desktop bypasses.
+	// Unprivileged (HKCU / shell profile) and idempotent. Best-effort, non-fatal.
+	m.ensureInPath()
+
 	if !m.Installed() {
 		return fmt.Errorf("vantaloomctl 未在安装后出现于 %s（下载可能损坏）", m.ctlPath())
 	}
 	return nil
+}
+
+// ensureInPath adds the install prefix to the user-level PATH so `vantaloom`
+// (the launcher written by writeLauncher) can be run as a bare command. It
+// reuses the proven, unprivileged PATH helpers from node.go (HKCU\Environment
+// via reg.exe on Windows — deliberately NOT setx, which truncates at 1024 chars;
+// shell-profile export on unix). Idempotent (the helpers no-op if the dir is
+// already present) and best-effort/non-fatal.
+func (m *Manager) ensureInPath() {
+	persistDirOnUserPath(m.Prefix)
 }
 
 // writeConfig persists cli/config.json so a later `vantaloom update` (or our own
