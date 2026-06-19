@@ -55,6 +55,19 @@ func (a *App) OpenInBrowser(url string) {
 	wruntime.BrowserOpenURL(a.ctx, url)
 }
 
+// CaptureWebview returns a base64-encoded PNG of the app window so the frontend
+// can offer a "snapshot the page" affordance now that the bundled Obscura
+// headless browser engine can't itself produce screenshots.
+//
+// On Windows it BitBlts the window's client area from the screen DC (pure Win32
+// syscalls — no cgo/deps), capturing the actual rendered WebView2 pixels
+// including the cross-origin <iframe> preview. macOS/Linux report unsupported
+// (see screenshot_other.go) and the frontend falls back (hides the snapshot
+// button). Bound to the UI as window.go.main.App.CaptureWebview().
+func (a *App) CaptureWebview() (string, error) {
+	return captureMainWindow()
+}
+
 // Bootstrap detects the local runtime and brings it to a ready state, emitting
 // progress events as it goes, then returns the URL the webview should load.
 //
