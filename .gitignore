@@ -13,3 +13,4 @@ key.properties
 
 node_modules/
 dist/
+.cursor/
