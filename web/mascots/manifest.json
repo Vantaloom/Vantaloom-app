@@ -1,0 +1,62 @@
+[
+  {
+    "id": "093932c5",
+    "still": "093932c5-still.png",
+    "anim": "093932c5-anim.png",
+    "w": 323,
+    "h": 364,
+    "opaque": 40134,
+    "durationMs": 9270,
+    "frames": 139
+  },
+  {
+    "id": "2bc1aa46",
+    "still": "2bc1aa46-still.png",
+    "anim": "2bc1aa46-anim.png",
+    "w": 391,
+    "h": 437,
+    "opaque": 77389,
+    "durationMs": 5000,
+    "frames": 50
+  },
+  {
+    "id": "70b819f8",
+    "still": "70b819f8-still.png",
+    "anim": "70b819f8-anim.png",
+    "w": 258,
+    "h": 174,
+    "opaque": 30889,
+    "durationMs": 2410,
+    "frames": 72
+  },
+  {
+    "id": "70d3fbeb",
+    "still": "70d3fbeb-still.png",
+    "anim": "70d3fbeb-anim.png",
+    "w": 409,
+    "h": 294,
+    "opaque": 64239,
+    "durationMs": 2810,
+    "frames": 84
+  },
+  {
+    "id": "7afe73d9",
+    "still": "7afe73d9-still.png",
+    "anim": "7afe73d9-anim.png",
+    "w": 480,
+    "h": 285,
+    "opaque": 67586,
+    "durationMs": 5670,
+    "frames": 85
+  },
+  {
+    "id": "84f96115",
+    "still": "84f96115-still.png",
+    "anim": "84f96115-anim.png",
+    "w": 285,
+    "h": 315,
+    "opaque": 15730,
+    "durationMs": 6990,
+    "frames": 105
+  }
+]
