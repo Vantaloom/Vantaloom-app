@@ -3,8 +3,11 @@ name: Build Android APK
 on:
   push:
     branches: [main]
-    paths-ignore:
-      - "**/*.md"
+    paths:
+      - "android/**"
+      - "mobile-src/**"
+      - "web/**"
+      - ".github/workflows/build-apk.yml"
   workflow_dispatch:
 
 concurrency:
@@ -14,17 +17,17 @@ concurrency:
 jobs:
   build-apk:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 60
     permissions:
       contents: write # tag + create a release and upload the APK as a permanent asset
     env:
-      # arm64 covers essentially every real phone; add more targets later.
-      TAURI_ANDROID_TARGET: aarch64
+      # arm64 covers essentially every real phone.
+      GOMOBILE_TARGET: android/arm64
+      ANDROID_API: "24"
+      NDK_VER: "26.0.10792818"
+      AAR_OUT: android/app/libs/loomnet.aar
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install protoc + build tools (EasyTier build deps)
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler build-essential
 
       - name: Set up JDK 21
         uses: actions/setup-java@v4
@@ -32,146 +35,110 @@ jobs:
           distribution: temurin
           java-version: "21"
 
-      - name: Set up Rust (+ android target)
-        uses: dtolnay/rust-toolchain@stable
+      - name: Set up Go 1.26
+        uses: actions/setup-go@v5
         with:
-          targets: aarch64-linux-android
-
-      - name: Cache Rust build
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: src-tauri
+          go-version: "1.26.x"
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install Android NDK + platform
+      - name: Install Android NDK + platform + build-tools
         run: |
-          NDK_VER=26.0.10792818
-          sdkmanager "ndk;$NDK_VER" "platform-tools" "platforms;android-34" "build-tools;34.0.0"
-          NDK_DIR="$ANDROID_SDK_ROOT/ndk/$NDK_VER"
-          echo "NDK_HOME=$NDK_DIR" >> "$GITHUB_ENV"
+          set -euo pipefail
+          sdkmanager "ndk;${NDK_VER}" "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+          NDK_DIR="$ANDROID_SDK_ROOT/ndk/${NDK_VER}"
           echo "ANDROID_NDK_HOME=$NDK_DIR" >> "$GITHUB_ENV"
           echo "ANDROID_NDK_ROOT=$NDK_DIR" >> "$GITHUB_ENV"
-          # KEY FIX: prepend the NDK LLVM toolchain to PATH so the `cc` crate and
-          # bindgen use the Android clang (with its built-in sysroot) instead of
-          # host clang. Without this, kcp-sys's bindgen reads host /usr/include
-          # and dies on bits/libc-header-start.h. (Matches EasyTier mobile.yml.)
-          echo "$NDK_DIR/toolchains/llvm/prebuilt/linux-x86_64/bin" >> "$GITHUB_PATH"
 
-      - name: Install Tauri CLI
-        uses: cargo-bins/cargo-binstall@main
-      - run: cargo binstall -y tauri-cli@^2.0
-
-      - name: Tauri Android init (generates src-tauri/gen/android)
-        run: cargo tauri android init --skip-targets-install
-
-      - name: Generate app icons (real Vantaloom icon → all densities/mipmaps)
-        run: cargo tauri icon app-icon.png
-
-      - name: Allow cleartext HTTP (Hub + mesh runtimes are http://)
+      - name: Install gomobile + gobind
         run: |
           set -euo pipefail
-          MAIN=src-tauri/gen/android/app/src/main
-          MANIFEST="$MAIN/AndroidManifest.xml"
-          # A network security config DEFINITIVELY permits cleartext, overriding
-          # the release-mode `usesCleartextTraffic=false` that Tauri injects via
-          # the ${usesCleartextTraffic} manifest placeholder.
-          mkdir -p "$MAIN/res/xml"
-          {
-            echo '<?xml version="1.0" encoding="utf-8"?>'
-            echo '<network-security-config>'
-            echo '    <base-config cleartextTrafficPermitted="true" />'
-            echo '</network-security-config>'
-          } > "$MAIN/res/xml/network_security_config.xml"
-          # Reference the config + force the attribute true (idempotent; covers
-          # both the placeholder form and a missing attribute).
-          grep -q 'networkSecurityConfig' "$MANIFEST" || \
-            sed -i 's|<application|<application android:networkSecurityConfig="@xml/network_security_config"|' "$MANIFEST"
-          sed -i 's|android:usesCleartextTraffic="[^"]*"|android:usesCleartextTraffic="true"|' "$MANIFEST"
-          grep -q 'usesCleartextTraffic="true"' "$MANIFEST" || \
-            sed -i 's|<application|<application android:usesCleartextTraffic="true"|' "$MANIFEST"
-          echo "=== AndroidManifest <application> tag ==="
-          sed -n '/<application/,/>/p' "$MANIFEST"
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          go install golang.org/x/mobile/cmd/gobind@latest
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
-      - name: Register VpnService + dump Android wiring (debug)
+      - name: gomobile init
+        run: gomobile init
+
+      - name: Bind the loomnet overlay facade → AAR
         run: |
           set -euo pipefail
-          MANIFEST=src-tauri/gen/android/app/src/main/AndroidManifest.xml
-          # The plugin ships the Kotlin VpnService class but NOT a manifest <service>
-          # entry. Declare it — without this Android never lists the app as a VPN app
-          # and VpnService.prepare() shows no consent dialog (the bug we're chasing).
-          SVC='<service android:name="com.plugin.vpnservice.TauriVpnService" android:enabled="true" android:exported="false" android:permission="android.permission.BIND_VPN_SERVICE"><intent-filter><action android:name="android.net.VpnService" /></intent-filter></service>'
-          grep -q 'TauriVpnService' "$MANIFEST" || sed -i "s|</application>|${SVC}</application>|" "$MANIFEST"
-          echo "=== <service> declarations ==="; grep -o 'android:name="[^"]*Service"' "$MANIFEST" || echo "(none)"
-          echo "=== full AndroidManifest.xml ==="; cat "$MANIFEST"
-          echo "=== tauri.settings.gradle (are plugin android modules linked?) ==="
-          cat src-tauri/gen/android/tauri.settings.gradle 2>/dev/null || echo "(no tauri.settings.gradle)"
-          echo "=== app/build.gradle.kts plugin refs ==="
-          grep -iE 'vpnservice|tauri|implementation|project\(' src-tauri/gen/android/app/build.gradle.kts 2>/dev/null | head -40 || true
+          mkdir -p "$(dirname "$AAR_OUT")"
+          pushd mobile-src
+          # The generated bind code depends on the x/mobile bind runtime.
+          go get golang.org/x/mobile/bind
+          gomobile bind \
+            -target="${GOMOBILE_TARGET}" \
+            -androidapi "${ANDROID_API}" \
+            -javapkg=online.timefiles \
+            -o "${GITHUB_WORKSPACE}/${AAR_OUT}" \
+            ./mobile
+          popd
+          ls -la "$AAR_OUT"
 
-      - name: Build APK (release — stripped, size-optimized)
-        run: cargo tauri android build --apk --target ${{ env.TAURI_ANDROID_TARGET }}
-
-      - name: Use the committed stable signing keystore
+      - name: Stage the compiled web export into app assets
         run: |
           set -euo pipefail
-          # A FIXED keystore (committed in signing/) gives every build the SAME
-          # signature, so the app updates in place instead of failing with a
-          # "signatures do not match" error from a fresh per-build key.
-          mkdir -p "$HOME/.android"
-          cp signing/vantaloom.keystore "$HOME/.android/debug.keystore"
-          echo "Using committed stable keystore (alias androiddebugkey)."
+          if [ ! -f web/index.html ]; then
+            echo "ERROR: web/ export missing (expected the committed Next.js export)"; exit 1
+          fi
+          mkdir -p android/app/src/main/assets
+          # Copy the export to the assets root so absolute /_next/... paths resolve
+          # under the vantaloom.localhost origin. Drop the placeholder README.
+          rm -f android/app/src/main/assets/README.md
+          cp -r web/. android/app/src/main/assets/
+          echo "Staged $(find android/app/src/main/assets -type f | wc -l) web files."
 
-      - name: Sign release APK with debug keystore
+      - name: Set up Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: Assemble release APK (unsigned)
+        working-directory: android
         run: |
           set -euo pipefail
+          gradle :app:assembleRelease --no-daemon --stacktrace \
+            -PversionCode="${GITHUB_RUN_NUMBER}" \
+            -PversionName="0.13.5-build${GITHUB_RUN_NUMBER}"
+
+      - name: Sign release APK (keystore from GitHub secrets)
+        env:
+          SIGNING_KEYSTORE_BASE64: ${{ secrets.SIGNING_KEYSTORE_BASE64 }}
+          SIGNING_KEYSTORE_PASSWORD: ${{ secrets.SIGNING_KEYSTORE_PASSWORD }}
+          SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
+          SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SIGNING_KEYSTORE_BASE64:-}" ]; then
+            echo "ERROR: SIGNING_KEYSTORE_BASE64 secret is not set. See signing/README.md."; exit 1
+          fi
           BUILD_TOOLS="$ANDROID_SDK_ROOT/build-tools/34.0.0"
-          ZIPALIGN="$BUILD_TOOLS/zipalign"
-          APKSIGNER="$BUILD_TOOLS/apksigner"
-          echo "Using build-tools at: $BUILD_TOOLS"
-          ls -la "$BUILD_TOOLS" || true
+          KS="$RUNNER_TEMP/release.jks"
+          echo "$SIGNING_KEYSTORE_BASE64" | base64 -d > "$KS"
 
-          # Locate the unsigned release APK (universal or arm64-v8a, name varies).
-          UNSIGNED="$(find src-tauri/gen/android/app/build/outputs -name '*-release-unsigned.apk' | head -n1)"
-          if [ -z "$UNSIGNED" ]; then
-            echo "ERROR: no *-release-unsigned.apk found under build outputs:"
-            find src-tauri/gen/android/app/build/outputs -name '*.apk' || true
-            exit 1
+          UNSIGNED="android/app/build/outputs/apk/release/app-release-unsigned.apk"
+          if [ ! -f "$UNSIGNED" ]; then
+            echo "ERROR: unsigned release APK not found:"; find android/app/build/outputs -name '*.apk' || true; exit 1
           fi
-          echo "Unsigned release APK: $UNSIGNED"
 
-          ALIGNED="${UNSIGNED%-unsigned.apk}-aligned.apk"
-          "$ZIPALIGN" -f -p 4 "$UNSIGNED" "$ALIGNED"
-
-          # apksigner writes the signature in place on the aligned APK.
-          "$APKSIGNER" sign \
-            --ks "$HOME/.android/debug.keystore" \
-            --ks-pass pass:android \
-            --ks-key-alias androiddebugkey \
-            --key-pass pass:android \
+          ALIGNED="$RUNNER_TEMP/vantaloom-release-aligned.apk"
+          "$BUILD_TOOLS/zipalign" -f -p 4 "$UNSIGNED" "$ALIGNED"
+          "$BUILD_TOOLS/apksigner" sign \
+            --ks "$KS" \
+            --ks-pass "pass:${SIGNING_KEYSTORE_PASSWORD}" \
+            --ks-key-alias "${SIGNING_KEY_ALIAS}" \
+            --key-pass "pass:${SIGNING_KEY_PASSWORD}" \
             "$ALIGNED"
+          "$BUILD_TOOLS/apksigner" verify --verbose "$ALIGNED" || true
 
-          # Surface scheme info; don't let a benign v1-compat warning fail the job.
-          "$APKSIGNER" verify --verbose "$ALIGNED" || true
-          echo "SIGNED_APK=$ALIGNED" >> "$GITHUB_ENV"
-          echo "Signed release APK: $ALIGNED"
-
-      - name: Collect APK (uniquely named per build)
-        run: |
-          set -euo pipefail
           mkdir -p dist
-          # The signed release APK; never the unsigned/intermediate ones.
-          APK="$(find src-tauri/gen/android -name '*-release-aligned.apk' | head -n1)"
-          if [ -z "$APK" ]; then
-            echo "ERROR: no signed APK found:"; find src-tauri/gen/android -name '*.apk' || true; exit 1
-          fi
           SHA="$(git rev-parse --short HEAD)"
-          # Stamp build number + commit into the filename so every build is a
-          # distinct file (the phone's transfer app dedupes by name otherwise).
           NAME="vantaloom-build${GITHUB_RUN_NUMBER}-${SHA}.apk"
-          cp "$APK" "dist/$NAME"
-          echo "Collected: dist/$NAME"; ls -la dist
+          cp "$ALIGNED" "dist/$NAME"
+          echo "APK_NAME=$NAME" >> "$GITHUB_ENV"
+          echo "Signed: dist/$NAME"; ls -la dist
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
@@ -185,16 +152,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          # A fresh tag + Release per build so the signed APK is a PERMANENT
-          # download (Actions artifacts expire after a few weeks). The committed
-          # stable keystore means every build shares a signature, so the APK
-          # installs in place over the previous one (no uninstall needed).
           SHA="$(git rev-parse --short HEAD)"
           TAG="apk-build${GITHUB_RUN_NUMBER}-${SHA}"
-          APK="$(find dist -name '*.apk' | head -n1)"
-          if [ -z "$APK" ]; then echo "ERROR: no APK to release"; exit 1; fi
+          APK="dist/${APK_NAME}"
           gh release create "$TAG" "$APK" \
             --title "Vantaloom Android · build ${GITHUB_RUN_NUMBER} (${SHA})" \
-            --notes "Automated APK from ${SHA}. Install over any previous build (shared signing key — no uninstall needed)." \
+            --notes "Native Kotlin shell + loomnet overlay (gomobile AAR). Signature changed from the old debug key: uninstall any previous build once, then install." \
             --latest
           echo "Released $TAG → $(basename "$APK")"

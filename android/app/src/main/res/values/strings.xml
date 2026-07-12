@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Vantaloom</string>
+    <string name="loom_channel_name">Vantaloom 覆盖网络</string>
+    <string name="loom_notification_title">Vantaloom 已连接</string>
+    <string name="loom_notification_text">覆盖网络节点正在后台运行</string>
+</resources>

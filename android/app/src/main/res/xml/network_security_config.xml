@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Cleartext HTTP is permitted app-wide: the WebView page is served over
+  http://vantaloom.localhost (a *.localhost secure-context origin) and the local
+  overlay loopback proxy is http://127.0.0.1:<port>. Peer runtimes and self-hosted
+  Hubs may also be plain http. The official Hub is https (Cloudflare), unaffected.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>

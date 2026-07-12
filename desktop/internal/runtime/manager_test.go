@@ -110,22 +110,14 @@ func TestExtractTarGzRejectsTraversal(t *testing.T) {
 
 // writeFakePackage lays down a minimal valid runtime package on disk (not a
 // tarball) for exercising layDown directly.
-func writeFakePackage(t *testing.T, root, version, meshContent, appContent string) {
+func writeFakePackage(t *testing.T, root, version, appContent string) {
 	t.Helper()
 	mustWrite(t, filepath.Join(root, "manifest.json"), `{"version":"`+version+`"}`)
 	mustWrite(t, filepath.Join(root, "VERSION"), version+"\n")
 	mustWrite(t, filepath.Join(root, "bin", binaryName("vantaloomctl")), "ctl-binary")
-	mustWrite(t, filepath.Join(root, "bin", meshBinaryName()), meshContent)
 	mustWrite(t, filepath.Join(root, "bin", binaryName("vantaloom-api")), appContent)
 	mustWrite(t, filepath.Join(root, "web", "index.html"), "<html></html>")
 	mustWrite(t, filepath.Join(root, "cli", "config.json"), `{"existing":true}`)
-}
-
-func meshBinaryName() string {
-	if runtime.GOOS == "windows" {
-		return "vantaloom-mesh.exe"
-	}
-	return "vantaloom-mesh"
 }
 
 func mustWrite(t *testing.T, path, content string) {
@@ -141,7 +133,7 @@ func mustWrite(t *testing.T, path, content string) {
 func TestLayDownPlacesFilesAndConfig(t *testing.T) {
 	tmp := t.TempDir()
 	pkg := filepath.Join(tmp, "package")
-	writeFakePackage(t, pkg, "9.9.9", "MESH-V1", "API-V1")
+	writeFakePackage(t, pkg, "9.9.9", "API-V1")
 
 	m := New(filepath.Join(tmp, "prefix"), "https://registry.example.test/")
 	if err := m.layDown(t.Context(), pkg, "9.9.9", resolved{Version: "9.9.9"}); err != nil {
@@ -180,46 +172,12 @@ func TestLayDownPlacesFilesAndConfig(t *testing.T) {
 	}
 }
 
-func TestLayDownSkipsInstalledMeshBinary(t *testing.T) {
-	tmp := t.TempDir()
-	prefix := filepath.Join(tmp, "prefix")
-	m := New(prefix, "")
-
-	// First install: lays down mesh V1 + api V1.
-	pkg1 := filepath.Join(tmp, "pkg1")
-	writeFakePackage(t, pkg1, "1.0.0", "MESH-V1", "API-V1")
-	if err := m.layDown(t.Context(), pkg1, "1.0.0", resolved{Version: "1.0.0"}); err != nil {
-		t.Fatalf("layDown #1: %v", err)
-	}
-
-	// Second install from a package with changed mesh + api content.
-	pkg2 := filepath.Join(tmp, "pkg2")
-	writeFakePackage(t, pkg2, "2.0.0", "MESH-V2", "API-V2")
-	if err := m.layDown(t.Context(), pkg2, "2.0.0", resolved{Version: "2.0.0"}); err != nil {
-		t.Fatalf("layDown #2: %v", err)
-	}
-
-	// Mesh binary must be LEFT ALONE (already installed → skipped, no elevation).
-	mesh, _ := os.ReadFile(filepath.Join(prefix, "bin", meshBinaryName()))
-	if string(mesh) != "MESH-V1" {
-		t.Errorf("mesh binary = %q, want MESH-V1 (should be skipped on update)", mesh)
-	}
-	// Non-mesh binary must be overwritten.
-	api, _ := os.ReadFile(filepath.Join(prefix, "bin", binaryName("vantaloom-api")))
-	if string(api) != "API-V2" {
-		t.Errorf("api binary = %q, want API-V2 (should be overwritten)", api)
-	}
-	if v := m.InstalledVersion(); v != "2.0.0" {
-		t.Errorf("InstalledVersion = %q, want 2.0.0", v)
-	}
-}
-
 func TestAssertPackage(t *testing.T) {
 	tmp := t.TempDir()
 	if err := assertPackage(tmp); err == nil {
 		t.Fatal("expected assertPackage to fail on empty dir")
 	}
-	writeFakePackage(t, tmp, "1.0.0", "m", "a")
+	writeFakePackage(t, tmp, "1.0.0", "a")
 	if err := assertPackage(tmp); err != nil {
 		t.Errorf("assertPackage on valid package: %v", err)
 	}

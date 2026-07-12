@@ -8,67 +8,198 @@
       :root {
         --ink: #0b0d14;
         --graphite: #161a26;
+        --deep-slate: #1c2030;
         --ash: #8b93a7;
         --canvas: #f3f5fb;
         --teal: #3ad0c8;
         --violet: #8b7bf0;
         --pink: #ff5da2;
         --danger: #ff6b6b;
+        --success: #34d399;
+        --surface: rgba(255, 255, 255, 0.04);
+        --border: rgba(255, 255, 255, 0.08);
       }
-      * { box-sizing: border-box; }
-      html, body { height: 100%; margin: 0; }
+      * { box-sizing: border-box; margin: 0; }
+      html, body { height: 100%; }
       body {
         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
           "Microsoft YaHei", system-ui, sans-serif;
         color: var(--canvas);
-        background:
-          radial-gradient(120% 90% at 50% -10%, rgba(139, 123, 240, 0.22), transparent 60%),
-          radial-gradient(90% 70% at 90% 110%, rgba(58, 208, 200, 0.16), transparent 55%),
-          var(--ink);
-        display: flex;
-        align-items: center;
-        justify-content: center;
+        background: var(--ink);
         -webkit-user-select: none;
         user-select: none;
         overflow: hidden;
       }
-      .card {
-        width: min(440px, 86vw);
-        text-align: center;
-        padding: 8px 16px;
+
+      /* ── Boot UI（启动/更新阶段可见；进入应用后整体隐藏）── */
+      #bootui {
+        display: flex;
+        flex-direction: column;
+        height: 100%;
       }
+      #bootui.hidden { display: none; }
+
+      /* ── 应用宿主：webview 永远停在本页（Wails 资产源，runtime 拖拽/调节
+         可用），实际 UI 以全屏 iframe 嵌入。窗口边缘留出透明条带不被 iframe
+         覆盖 —— 落在条带上的鼠标事件归本页文档，Wails runtime 的无边框
+         边缘调节原生生效。── */
+      #appwrap { display: none; }
+      #appwrap.show { display: block; }
+      #appframe {
+        position: fixed;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        border: 0;
+        display: block;
+        background: var(--ink);
+      }
+      .rs { position: fixed; z-index: 60; }
+      .rs-t  { top: 0; left: 10px; right: 10px; height: 5px; cursor: ns-resize; }
+      .rs-b  { bottom: 0; left: 10px; right: 10px; height: 5px; cursor: ns-resize; }
+      .rs-l  { left: 0; top: 10px; bottom: 10px; width: 5px; cursor: ew-resize; }
+      .rs-r  { right: 0; top: 10px; bottom: 10px; width: 5px; cursor: ew-resize; }
+      .rs-tl { top: 0; left: 0; width: 10px; height: 10px; cursor: nwse-resize; }
+      .rs-br { bottom: 0; right: 0; width: 10px; height: 10px; cursor: nwse-resize; }
+      .rs-tr { top: 0; right: 0; width: 10px; height: 10px; cursor: nesw-resize; }
+      .rs-bl { bottom: 0; left: 0; width: 10px; height: 10px; cursor: nesw-resize; }
+
+      /* ── Title bar (boot 阶段的无边框顶栏) ── */
+      .titlebar {
+        height: 38px;
+        display: flex;
+        align-items: center;
+        padding: 0 4px;
+        background: var(--ink);
+        border-bottom: 1px solid var(--border);
+        flex-shrink: 0;
+        --wails-draggable: drag;
+      }
+      .titlebar-left, .titlebar-right {
+        display: flex;
+        align-items: center;
+        --wails-draggable: no-drag;
+      }
+      .titlebar-center { flex: 1; --wails-draggable: drag; }
+      .tb-btn {
+        width: 36px;
+        height: 30px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: none;
+        border: none;
+        color: var(--ash);
+        cursor: pointer;
+        border-radius: 6px;
+        transition: background 0.12s, color 0.12s;
+        padding: 0;
+        font: inherit;
+        --wails-draggable: no-drag;
+      }
+      .tb-btn:hover { background: rgba(255,255,255,0.07); color: var(--canvas); }
+      .tb-btn.close:hover { background: #e81123; color: #fff; }
+      .tb-btn svg { width: 16px; height: 16px; }
+      .tb-btn.disabled { opacity: 0.3; cursor: default; }
+      .tb-btn.disabled:hover { background: none; color: var(--ash); }
+
+      /* ── Main content area ── */
+      .content {
+        flex: 1;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        position: relative;
+        overflow: hidden;
+      }
+      .content::before {
+        content: '';
+        position: absolute;
+        inset: 0;
+        background:
+          radial-gradient(ellipse 100% 80% at 50% -5%, rgba(139, 123, 240, 0.18), transparent 55%),
+          radial-gradient(ellipse 80% 60% at 85% 105%, rgba(58, 208, 200, 0.12), transparent 50%);
+        pointer-events: none;
+      }
+
+      .shell {
+        position: relative;
+        width: min(460px, 88vw);
+        text-align: center;
+        padding: 0 20px;
+      }
+
       .logo {
-        width: 64px;
-        height: 64px;
-        margin: 0 auto 22px;
-        border-radius: 18px;
+        width: 56px;
+        height: 56px;
+        margin: 0 auto 20px;
+        border-radius: 16px;
         background: linear-gradient(135deg, var(--teal), var(--violet));
         display: flex;
         align-items: center;
         justify-content: center;
-        font-size: 30px;
+        font-size: 26px;
         font-weight: 700;
         color: var(--ink);
-        box-shadow: 0 10px 40px rgba(139, 123, 240, 0.35);
+        box-shadow: 0 8px 32px rgba(139, 123, 240, 0.3);
       }
+
       h1 {
-        font-size: 22px;
+        font-size: 20px;
         font-weight: 650;
-        letter-spacing: 0.5px;
-        margin: 0 0 6px;
+        letter-spacing: 0.3px;
+        margin: 0 0 4px;
       }
-      .status {
-        min-height: 22px;
-        font-size: 14px;
+      .version-tag {
+        font-size: 11px;
+        font-weight: 500;
         color: var(--ash);
-        margin: 0 0 22px;
-        transition: color 0.2s;
+        opacity: 0.6;
+        margin-bottom: 18px;
       }
+
+      .status-card {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        padding: 16px 18px;
+        text-align: left;
+        margin-bottom: 14px;
+      }
+      .status-header {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin-bottom: 12px;
+      }
+      .status-icon {
+        width: 28px;
+        height: 28px;
+        border-radius: 8px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex-shrink: 0;
+        font-size: 14px;
+      }
+      .status-icon.loading { background: rgba(139, 123, 240, 0.15); color: var(--violet); }
+      .status-icon.success { background: rgba(52, 211, 153, 0.15); color: var(--success); }
+      .status-icon.error { background: rgba(255, 107, 107, 0.15); color: var(--danger); }
+      .status-text {
+        font-size: 14px;
+        font-weight: 550;
+        color: var(--canvas);
+        line-height: 1.3;
+      }
+      .status-detail { font-size: 12px; color: var(--ash); margin-top: 2px; }
+
+      .progress-area { margin-top: 2px; }
+      .bar-row { display: flex; align-items: center; gap: 10px; }
       .bar {
-        height: 6px;
-        width: 100%;
+        flex: 1;
+        height: 4px;
         border-radius: 99px;
-        background: rgba(255, 255, 255, 0.08);
+        background: rgba(255, 255, 255, 0.06);
         overflow: hidden;
       }
       .bar > i {
@@ -77,7 +208,7 @@
         width: 0%;
         border-radius: 99px;
         background: linear-gradient(90deg, var(--teal), var(--violet));
-        transition: width 0.35s ease;
+        transition: width 0.4s ease;
       }
       .bar.indeterminate > i {
         width: 35% !important;
@@ -89,64 +220,105 @@
       }
       .pct {
         font-variant-numeric: tabular-nums;
+        font-size: 11px;
+        font-weight: 550;
+        color: var(--ash);
+        min-width: 32px;
+        text-align: right;
+      }
+
+      .phases { margin-top: 12px; display: flex; flex-direction: column; }
+      .phase-item {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 5px 0;
         font-size: 12px;
         color: var(--ash);
-        margin-top: 10px;
-        height: 16px;
+        opacity: 0.45;
+        transition: opacity 0.2s, color 0.2s;
       }
-      .actions {
-        margin-top: 18px;
+      .phase-item.active { opacity: 1; color: var(--canvas); }
+      .phase-item.done { opacity: 0.65; color: var(--success); }
+      .phase-dot {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: currentColor;
+        flex-shrink: 0;
+      }
+      .phase-item.active .phase-dot {
+        background: var(--violet);
+        box-shadow: 0 0 6px rgba(139, 123, 240, 0.5);
+      }
+      .phase-item.done .phase-dot { background: var(--success); }
+
+      .error-msg {
         display: none;
-        gap: 10px;
+        font-size: 13px;
+        color: var(--danger);
+        line-height: 1.5;
+        word-break: break-word;
+        margin-top: 8px;
+        padding: 10px 12px;
+        border-radius: 10px;
+        background: rgba(255, 107, 107, 0.08);
+        border: 1px solid rgba(255, 107, 107, 0.15);
+        text-align: left;
+      }
+      .error-msg.show { display: block; }
+
+      .actions {
+        margin-top: 14px;
+        display: none;
+        gap: 8px;
         justify-content: center;
       }
       .actions.show { display: flex; }
       button {
         font: inherit;
         font-size: 13px;
-        padding: 9px 18px;
+        font-weight: 500;
+        padding: 8px 16px;
         border-radius: 10px;
-        border: 1px solid rgba(255, 255, 255, 0.14);
-        background: rgba(255, 255, 255, 0.06);
+        border: 1px solid var(--border);
+        background: var(--surface);
         color: var(--canvas);
         cursor: pointer;
         transition: background 0.15s, border-color 0.15s;
       }
-      button:hover { background: rgba(255, 255, 255, 0.12); }
+      button:hover {
+        background: rgba(255, 255, 255, 0.1);
+        border-color: rgba(255, 255, 255, 0.15);
+      }
       button.primary {
         background: linear-gradient(135deg, var(--teal), var(--violet));
         color: var(--ink);
         border-color: transparent;
         font-weight: 600;
       }
-      .error {
-        display: none;
-        margin: 0 0 14px;
-        font-size: 13px;
-        color: var(--danger);
-        line-height: 1.5;
-        word-break: break-word;
-      }
-      .error.show { display: block; }
+      button.primary:hover { opacity: 0.9; }
+
       .log-toggle {
-        margin-top: 22px;
+        margin-top: 16px;
         font-size: 11px;
         color: var(--ash);
-        opacity: 0.6;
+        opacity: 0.5;
         cursor: pointer;
       }
-      .log-toggle:hover { opacity: 1; }
+      .log-toggle:hover { opacity: 0.8; }
       pre.log {
         display: none;
         text-align: left;
-        max-height: 150px;
+        max-height: 140px;
         overflow: auto;
-        margin: 12px 0 0;
+        margin: 10px 0 0;
         padding: 10px 12px;
         border-radius: 10px;
-        background: rgba(0, 0, 0, 0.35);
+        background: rgba(0, 0, 0, 0.3);
+        border: 1px solid var(--border);
         color: var(--ash);
-        font-size: 11px;
+        font-size: 10px;
         line-height: 1.6;
         white-space: pre-wrap;
       }
@@ -159,62 +331,142 @@
         align-items: center;
         justify-content: center;
         padding: 20px;
-        background: rgba(0, 0, 0, 0.55);
-        -webkit-backdrop-filter: blur(3px);
-        backdrop-filter: blur(3px);
+        background: rgba(0, 0, 0, 0.6);
+        backdrop-filter: blur(6px);
         z-index: 50;
       }
       .modal-overlay.show { display: flex; }
       .modal {
-        width: min(460px, 90vw);
+        width: min(420px, 90vw);
         text-align: left;
         padding: 22px 22px 18px;
         border-radius: 16px;
-        background: var(--graphite);
-        border: 1px solid rgba(255, 255, 255, 0.1);
-        box-shadow: 0 24px 70px rgba(0, 0, 0, 0.55);
+        background: var(--deep-slate);
+        border: 1px solid var(--border);
+        box-shadow: 0 24px 70px rgba(0, 0, 0, 0.5);
       }
-      .modal h2 { font-size: 17px; font-weight: 650; margin: 0 0 12px; }
+      .modal h2 { font-size: 16px; font-weight: 650; margin: 0 0 6px; }
+      .modal .version-badge {
+        display: inline-block;
+        font-size: 11px;
+        font-weight: 600;
+        padding: 2px 8px;
+        border-radius: 6px;
+        background: rgba(139, 123, 240, 0.15);
+        color: var(--violet);
+        margin-bottom: 14px;
+      }
       .modal .modal-body {
         font-size: 13px;
         color: var(--ash);
         line-height: 1.7;
         margin: 0 0 20px;
       }
-      .modal-actions { display: flex; gap: 10px; justify-content: flex-end; }
+      .modal-actions { display: flex; gap: 8px; justify-content: flex-end; }
+
+      @keyframes spin { to { transform: rotate(360deg); } }
+      .spinner {
+        width: 14px;
+        height: 14px;
+        border: 2px solid rgba(139, 123, 240, 0.3);
+        border-top-color: var(--violet);
+        border-radius: 50%;
+        animation: spin 0.7s linear infinite;
+      }
     </style>
   </head>
   <body>
-    <main class="card">
-      <div class="logo">V</div>
-      <h1>Vantaloom</h1>
-      <p class="status" id="status">正在启动…</p>
-
-      <p class="error" id="error"></p>
-
-      <div class="bar" id="bar"><i id="barFill"></i></div>
-      <div class="pct" id="pct"></div>
-
-      <div class="actions" id="actions">
-        <button class="primary" id="retry">重试</button>
-        <button id="browser">在浏览器中打开</button>
+    <div id="bootui">
+      <!-- Frameless title bar (boot 阶段) -->
+      <div class="titlebar">
+        <div class="titlebar-left">
+          <button class="tb-btn disabled" title="菜单">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/></svg>
+          </button>
+        </div>
+        <div class="titlebar-center"></div>
+        <div class="titlebar-right">
+          <button class="tb-btn" id="tbMin" title="最小化">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="6" y1="12" x2="18" y2="12"/></svg>
+          </button>
+          <button class="tb-btn" id="tbMax" title="最大化">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="6" y="6" width="12" height="12" rx="1.5"/></svg>
+          </button>
+          <button class="tb-btn close" id="tbClose" title="关闭">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="7" y1="7" x2="17" y2="17"/><line x1="17" y1="7" x2="7" y2="17"/></svg>
+          </button>
+        </div>
       </div>
 
-      <div class="log-toggle" id="logToggle">显示详细日志</div>
-      <pre class="log" id="log"></pre>
-    </main>
+      <div class="content">
+        <main class="shell">
+          <div class="logo">V</div>
+          <h1>Vantaloom</h1>
+          <div class="version-tag" id="versionTag"></div>
+
+          <div class="status-card">
+            <div class="status-header">
+              <div class="status-icon loading" id="statusIcon">
+                <div class="spinner"></div>
+              </div>
+              <div>
+                <div class="status-text" id="status">正在启动…</div>
+                <div class="status-detail" id="statusDetail"></div>
+              </div>
+            </div>
+
+            <div class="progress-area" id="progressArea">
+              <div class="bar-row">
+                <div class="bar indeterminate" id="bar"><i id="barFill"></i></div>
+                <div class="pct" id="pct"></div>
+              </div>
+              <div class="phases" id="phases"></div>
+            </div>
+
+            <div class="error-msg" id="error"></div>
+          </div>
+
+          <div class="actions" id="actions">
+            <button class="primary" id="retry">重试</button>
+            <button id="browser">在浏览器中打开</button>
+          </div>
+
+          <div class="log-toggle" id="logToggle">显示详细日志</div>
+          <pre class="log" id="log"></pre>
+        </main>
+      </div>
+    </div>
+
+    <!-- 应用宿主：iframe + 边缘调节条带（本页文档承接边缘鼠标事件，
+         Wails runtime 的无边框拖拽/调节在此源原生可用）。 -->
+    <div id="appwrap">
+      <iframe
+        id="appframe"
+        allow="clipboard-read; clipboard-write; fullscreen; autoplay; microphone; camera; display-capture; geolocation"
+        allowfullscreen
+      ></iframe>
+      <div class="rs rs-t"></div>
+      <div class="rs rs-b"></div>
+      <div class="rs rs-l"></div>
+      <div class="rs rs-r"></div>
+      <div class="rs rs-tl"></div>
+      <div class="rs rs-tr"></div>
+      <div class="rs rs-bl"></div>
+      <div class="rs rs-br"></div>
+    </div>
 
     <div class="modal-overlay" id="updateModal">
       <div class="modal">
-        <h2 id="updateTitle">发现新版本</h2>
+        <h2>发现新版本</h2>
+        <div class="version-badge" id="updateVersion"></div>
         <p class="modal-body">
-          Vantaloom 仍在运行。请先确认当前是否有 agent 正在运行：<br />
-          • 有正在运行的 agent → 选「忽略本次更新」，本次跳过，更新留到下次打开。<br />
-          • 没有 agent 在运行 → 选「结束并更新」，将先停止当前服务，更新后自动重启。
+          Vantaloom 后端正在运行中。<br /><br />
+          • 如果有 agent 正在工作 → 选择「跳过」，下次启动时更新。<br />
+          • 如果当前没有任务 → 选择「立即更新」，将停止服务并更新。
         </p>
         <div class="modal-actions">
-          <button id="updateSkip">忽略本次更新</button>
-          <button class="primary" id="updateProceed">结束并更新</button>
+          <button id="updateSkip">跳过</button>
+          <button class="primary" id="updateProceed">立即更新</button>
         </div>
       </div>
     </div>
@@ -222,32 +474,131 @@
     <script>
       const $ = (id) => document.getElementById(id);
       const statusEl = $("status");
+      const statusDetail = $("statusDetail");
+      const statusIcon = $("statusIcon");
       const errorEl = $("error");
       const bar = $("bar");
       const barFill = $("barFill");
       const pct = $("pct");
       const actions = $("actions");
       const logEl = $("log");
-
+      const phasesEl = $("phases");
       const updateModal = $("updateModal");
 
       let targetURL = "";
 
+      // ── Title bar window controls ──
+      function initTitleBar() {
+        $("tbMin").addEventListener("click", () => {
+          if (window.go?.main?.App?.Minimise) window.go.main.App.Minimise();
+        });
+        $("tbMax").addEventListener("click", () => {
+          if (window.go?.main?.App?.ToggleMaximise) window.go.main.App.ToggleMaximise();
+        });
+        $("tbClose").addEventListener("click", () => {
+          if (window.go?.main?.App?.CloseWindow) window.go.main.App.CloseWindow();
+        });
+      }
+
+      // ── 应用宿主 ──
+      // 进入应用 = 隐藏 boot UI、显示 iframe。webview 顶层永远停在本页：
+      // Wails runtime（拖拽/边缘调节/window.go）持续可用。
+      function enterApp(url) {
+        $("bootui").classList.add("hidden");
+        const wrap = $("appwrap");
+        wrap.classList.add("show");
+        const frame = $("appframe");
+        frame.addEventListener(
+          "load",
+          () => { try { frame.contentWindow.focus(); } catch (_) {} },
+          { once: true }
+        );
+        frame.src = url;
+      }
+
+      // 应用内标题栏把拖拽请求 postMessage 到本页 —— 在 Wails 资产源上
+      // WailsInvoke("drag") 就是官方 runtime 自己的拖拽路径（实测可用）。
+      window.addEventListener("message", (e) => {
+        if (!e.origin.startsWith("http://127.0.0.1:")) return;
+        const type = e.data && e.data.type;
+        if (type === "vtl:drag" && typeof window.WailsInvoke === "function") {
+          window.WailsInvoke("drag");
+        }
+      });
+
+      // 后端更新完成后由壳注入调用：只刷 iframe，不动本页。
+      window.__vtlReloadApp = () => {
+        const frame = $("appframe");
+        if (frame && frame.src) frame.src = frame.src;
+        else window.location.reload();
+      };
+
+      // ── Phase tracking ──
+      const PHASES = [
+        { key: "check",    label: "检查更新" },
+        { key: "resolve",  label: "查询版本" },
+        { key: "download", label: "下载运行时" },
+        { key: "extract",  label: "解压文件" },
+        { key: "install",  label: "安装文件" },
+        { key: "register", label: "注册服务" },
+        { key: "start",    label: "启动后端" },
+        { key: "wait",     label: "等待就绪" },
+      ];
+      let activePhases = new Set();
+      let donePhases = new Set();
+      let currentPhase = "";
+      let showPhases = false;
+
+      function renderPhases() {
+        if (!showPhases || activePhases.size === 0) {
+          phasesEl.innerHTML = "";
+          return;
+        }
+        const visible = PHASES.filter(p => activePhases.has(p.key));
+        phasesEl.innerHTML = visible.map(p => {
+          const cls = donePhases.has(p.key) ? "done" : p.key === currentPhase ? "active" : "";
+          return `<div class="phase-item ${cls}"><div class="phase-dot"></div><span>${p.label}</span></div>`;
+        }).join("");
+      }
+
+      function advancePhase(phase) {
+        if (!phase) return;
+        if (currentPhase && currentPhase !== phase) donePhases.add(currentPhase);
+        currentPhase = phase;
+        activePhases.add(phase);
+        if (["resolve","download","extract","install","register","mesh","start","wait"].includes(phase)) {
+          showPhases = true;
+          ["resolve","download","extract","install","register","start","wait"].forEach(k => activePhases.add(k));
+        }
+        renderPhases();
+      }
+
+      // ── Update modal ──
       function showUpdateModal(latest) {
-        $("updateTitle").textContent = latest
-          ? "发现新版本 " + latest
-          : "发现新版本";
+        $("updateVersion").textContent = latest ? "v" + latest : "";
         updateModal.classList.add("show");
       }
       function answerUpdate(proceed) {
         updateModal.classList.remove("show");
-        if (window.go && window.go.main && window.go.main.App) {
-          window.go.main.App.AnswerUpdatePrompt(proceed);
-        }
-        setStatus(proceed ? "正在结束并更新…" : "正在进入…");
+        if (window.go?.main?.App) window.go.main.App.AnswerUpdatePrompt(proceed);
+        setStatus(proceed ? "正在停止服务并更新…" : "正在进入…", "");
       }
 
-      function setStatus(msg) { statusEl.textContent = msg || ""; }
+      // ── UI helpers ──
+      function setStatus(msg, detail) {
+        statusEl.textContent = msg || "";
+        if (detail !== undefined) statusDetail.textContent = detail || "";
+      }
+      function setIconState(state) {
+        statusIcon.className = "status-icon " + state;
+        if (state === "loading") {
+          statusIcon.innerHTML = '<div class="spinner"></div>';
+        } else if (state === "success") {
+          statusIcon.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>';
+        } else {
+          statusIcon.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="15" y1="9" x2="9" y2="15"></line><line x1="9" y1="9" x2="15" y2="15"></line></svg>';
+        }
+      }
       function setProgress(p) {
         if (typeof p === "number" && p >= 0) {
           bar.classList.remove("indeterminate");
@@ -264,10 +615,11 @@
         logEl.scrollTop = logEl.scrollHeight;
       }
       function showError(msg) {
-        errorEl.textContent = "无法启动 Vantaloom：" + msg;
+        errorEl.textContent = msg;
         errorEl.classList.add("show");
         actions.classList.add("show");
-        setStatus("启动失败");
+        setStatus("启动失败", "请检查网络连接或重试");
+        setIconState("error");
         setProgress(0);
         bar.classList.remove("indeterminate");
         appendLog("error", msg);
@@ -275,19 +627,16 @@
       function clearError() {
         errorEl.classList.remove("show");
         actions.classList.remove("show");
+        setIconState("loading");
       }
 
-      // Resolve once the Wails runtime + bindings are injected.
+      // ── Wails bridge ──
       function waitForWails(timeoutMs = 8000) {
         return new Promise((resolve, reject) => {
           const start = Date.now();
           (function poll() {
-            if (window.runtime && window.go && window.go.main && window.go.main.App) {
-              return resolve();
-            }
-            if (Date.now() - start > timeoutMs) {
-              return reject(new Error("桌面运行环境未就绪（window.go 不可用）"));
-            }
+            if (window.runtime && window.go?.main?.App) return resolve();
+            if (Date.now() - start > timeoutMs) return reject(new Error("桌面运行环境未就绪"));
             setTimeout(poll, 60);
           })();
         });
@@ -295,52 +644,70 @@
 
       async function boot() {
         clearError();
-        setStatus("正在检测本机 Vantaloom…");
-        setProgress(-1); // indeterminate until first progress event
+        setStatus("正在检测 Vantaloom…", "");
+        setProgress(-1);
+        showPhases = false;
+        activePhases.clear();
+        donePhases.clear();
+        currentPhase = "";
+        renderPhases();
+
         try {
           await waitForWails();
+          initTitleBar();
+          try {
+            const st = await window.go.main.App.GetStatus();
+            if (st?.installedVersion) $("versionTag").textContent = "v" + st.installedVersion;
+          } catch (_) {}
         } catch (e) {
-          // Opened outside the desktop shell (e.g. a plain browser) — nothing to do.
           showError(e.message);
           return;
         }
-        // Register event listeners (incl. the update-prompt modal) BEFORE
-        // Bootstrap runs, so an emitted prompt is never missed.
+
         subscribe();
         try {
           targetURL = await window.go.main.App.Bootstrap();
-          setStatus("就绪，正在进入…");
+          setStatus("就绪", "正在进入应用…");
+          setIconState("success");
           setProgress(100);
-          // Hand the webview off to the live local app (same-origin localhost).
-          window.location.replace(targetURL);
+          activePhases.forEach(k => donePhases.add(k));
+          renderPhases();
+          await new Promise(r => setTimeout(r, 400));
+          enterApp(targetURL);
         } catch (e) {
-          showError((e && e.message) ? e.message : String(e));
+          showError((e?.message) ? e.message : String(e));
         }
       }
 
-      // Live progress from the Go backend bootstrap.
       let subscribed = false;
       function subscribe() {
         if (subscribed) return;
-        if (!window.runtime || !window.runtime.EventsOn) return;
+        if (!window.runtime?.EventsOn) return;
         subscribed = true;
         window.runtime.EventsOn("vantaloom:boot", (p) => {
           if (!p) return;
-          if (p.message) setStatus(p.message);
+          if (p.phase) advancePhase(p.phase);
+          if (p.message) {
+            let detail = "";
+            if (p.phase === "download") {
+              const m = p.message.match(/(\d+)%/);
+              if (m) detail = "下载进度 " + m[1] + "%";
+            }
+            setStatus(p.message, detail);
+          }
           if (typeof p.percent === "number") setProgress(p.percent);
           appendLog(p.phase, p.message || "");
         });
-        // The runtime is up and an update is available — show the in-page modal.
         window.runtime.EventsOn("vantaloom:update-prompt", (p) => {
-          showUpdateModal(p && p.latest);
+          showUpdateModal(p?.latest);
         });
       }
 
       $("retry").addEventListener("click", boot);
       $("browser").addEventListener("click", () => {
-        if (targetURL && window.go && window.go.main) {
-          window.go.main.App.OpenInBrowser(targetURL);
-        }
+        // Strip the desktop-shell markers — a plain browser must not render
+        // the in-app title bar.
+        if (targetURL && window.go?.main) window.go.main.App.OpenInBrowser(targetURL.split("?")[0]);
       });
       $("logToggle").addEventListener("click", () => {
         const open = logEl.classList.toggle("show");
@@ -349,8 +716,6 @@
       $("updateSkip").addEventListener("click", () => answerUpdate(false));
       $("updateProceed").addEventListener("click", () => answerUpdate(true));
 
-      // boot() registers the event listeners (subscribe) before calling
-      // Bootstrap, so the update-prompt event is never missed.
       window.addEventListener("DOMContentLoaded", boot);
     </script>
   </body>

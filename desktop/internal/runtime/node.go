@@ -1,8 +1,8 @@
 package runtime
 
 // EnsureNode guarantees a usable Node.js exists before the desktop shell boots
-// the runtime. The runtime launcher (vantaloom.cmd / vantaloom) and ACP adapters
-// shell out to the system `node`; on a fresh machine with no Node those fail.
+// the runtime. The runtime launcher (vantaloom.cmd / vantaloom) shells out to
+// the system `node`; on a fresh machine with no Node that fails.
 //
 // EnsureNode detects an existing node and, failing that, downloads a pinned LTS
 // from a China-friendly mirror (npmmirror) into a per-user managed dir, persists
