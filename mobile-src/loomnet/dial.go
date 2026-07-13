@@ -125,24 +125,66 @@ func (n *Node) dialDirect(ctx context.Context, machineID, fp string, eps Endpoin
 }
 
 // dialPublic dials the peer's explicitly configured 公网直连 address（0.14
-// 第二方式）: a single "host:port" candidate, mTLS fingerprint pinned exactly
-// like LAN direct.
+// 第二方式）, mTLS fingerprint pinned exactly like LAN direct. The host is
+// expanded to EVERY resolved IP and raced in parallel（0.14.5）——multi-node
+// providers (frp 集群等) publish several A records, and the old single
+// ResolveUDPAddr pick meant each dialer's DNS luck decided which node it hit:
+// one dead/path-filtered node blackholed the whole method even when a sibling
+// node worked（2026-07-14 frp-hip.com 双 A 记录实锤）.
 func (n *Node) dialPublic(ctx context.Context, machineID, fp string, eps Endpoints) (*quicSession, error) {
 	if eps.Public == "" {
 		return nil, errors.New("loomnet: public: 对方未配置公网直连地址")
 	}
-	addr, err := resolveCandidate(eps.Public, 0)
+	rctx, rcancel := context.WithTimeout(ctx, 2*time.Second)
+	cands, err := publicCandidates(rctx, eps.Public)
+	rcancel()
 	if err != nil {
 		return nil, fmt.Errorf("loomnet: public: 对方通告的公网地址 %q 无法解析: %w", eps.Public, err)
 	}
-	s, rerr := n.raceCandidates(ctx, machineID, fp, []*net.UDPAddr{addr}, publicTimeout)
+	s, rerr := n.raceCandidates(ctx, machineID, fp, cands, publicTimeout)
 	if rerr == nil {
 		return s, nil
 	}
 	return nil, fmt.Errorf(
-		"loomnet: public: 公网直连 %s 未拨通——请确认对方公网地址/端口正确、该 UDP 端口已在对方防火墙与云安全组放行、端口转发（如有）指向对方运行时。逐地址结果：%w",
-		eps.Public, rerr,
+		"loomnet: public: 公网直连 %s（解析到 %d 个地址，已并行全试）未拨通——请确认对方公网地址/端口正确、该 UDP 端口已在对方防火墙与云安全组放行、端口转发（如有）指向对方运行时。逐地址结果：%w",
+		eps.Public, len(cands), rerr,
 	)
+}
+
+// maxPublicCandidates bounds the parallel race when a hostname resolves to
+// many records (anycast/大集群), keeping goroutine fanout sane.
+const maxPublicCandidates = 8
+
+// publicCandidates expands a 公网直连 "host:port" into every resolved IP as a
+// dial candidate. Literal IPs pass through untouched; hostnames resolve to all
+// A/AAAA records (capped) so a single dead node can't blackhole the method.
+func publicCandidates(ctx context.Context, public string) ([]*net.UDPAddr, error) {
+	host, portStr, err := net.SplitHostPort(public)
+	if err != nil {
+		return nil, err
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil || port < 1 || port > 65535 {
+		return nil, fmt.Errorf("端口无效：%q", portStr)
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return []*net.UDPAddr{{IP: ip, Port: port}}, nil
+	}
+	ips, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
+	if err != nil {
+		return nil, err
+	}
+	cands := make([]*net.UDPAddr, 0, len(ips))
+	for _, ip := range ips {
+		cands = append(cands, &net.UDPAddr{IP: ip, Port: port})
+		if len(cands) >= maxPublicCandidates {
+			break
+		}
+	}
+	if len(cands) == 0 {
+		return nil, errors.New("解析不到任何 IP 地址")
+	}
+	return cands, nil
 }
 
 // drainSessions closes any sessions that finished their handshake after a winner
