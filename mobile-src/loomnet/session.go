@@ -9,9 +9,9 @@ import (
 )
 
 // Session is the transport-agnostic view of a peer connection (design §3.2).
-// Every dial tier — direct, hole-punch, and relay — produces a Session, so the
-// HTTP layer only ever calls OpenStream/AcceptStream and streaming (SSE,
-// terminals) works identically on all three.
+// Every dial method produces a Session, so the HTTP layer only ever calls
+// OpenStream/AcceptStream and streaming (SSE, terminals) works identically on
+// every method.
 type Session interface {
 	// OpenStream opens a new multiplexed stream to the peer (near side sends).
 	OpenStream(ctx context.Context) (net.Conn, error)
@@ -22,8 +22,8 @@ type Session interface {
 	Close() error
 }
 
-// quicSession is the direct/hole-punch implementation of Session: QUIC over the
-// shared UDP socket, with native stream multiplexing.
+// quicSession is the QUIC implementation of Session: QUIC over the shared UDP
+// socket, with native stream multiplexing.
 type quicSession struct {
 	conn      *quic.Conn
 	remoteID  string
@@ -77,3 +77,8 @@ func newStreamConn(conn *quic.Conn, st *quic.Stream, remoteID string) *streamCon
 func (c *streamConn) LocalAddr() net.Addr     { return c.local }
 func (c *streamConn) RemoteAddr() net.Addr    { return c.remote }
 func (c *streamConn) RemoteMachineID() string { return c.remoteID }
+
+func (c *streamConn) Close() error {
+	c.Stream.CancelRead(0)
+	return c.Stream.Close()
+}

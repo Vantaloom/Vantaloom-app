@@ -14,14 +14,11 @@ import (
 // so these are tighter than the legacy easytier ladder.
 const (
 	directTimeout = 3 * time.Second
-	relayTimeout  = 5 * time.Second
 )
 
 // Last-path labels reported by LastPath for the topology UI (§4.6, §7.4).
 const (
 	pathDirect = "direct"
-	pathP2P    = "p2p"
-	pathRelay  = "relay"
 )
 
 // getOrDialConn returns a live Session to machineID, reusing the cached one or
@@ -49,41 +46,11 @@ func (n *Node) getOrDialConn(ctx context.Context, machineID string) (Session, er
 	})
 }
 
-// dialLadder runs reuse→direct→punch→relay (§4). The first QUIC handshake to
-// succeed wins; if every tier fails the joined error is returned so the caller
-// can fall back to the legacy WS-envelope bridge (§7.3).
+// dialLadder delegates to the DialerRegistry, which runs registered dialers in
+// priority order (currently just LAN direct). New methods can be added via
+// n.Registry.Register() without modifying this function.
 func (n *Node) dialLadder(ctx context.Context, machineID string) (Session, string, error) {
-	fp, eps, ok := n.opts.Directory.PeerInfo(machineID)
-	if !ok {
-		return nil, "", fmt.Errorf("loomnet: no directory entry for %s", machineID)
-	}
-	var errs []error
-
-	if s, err := n.dialDirect(ctx, machineID, fp, eps); err == nil {
-		return s, pathDirect, nil
-	} else {
-		errs = append(errs, err)
-	}
-
-	if s, err := n.punch(ctx, machineID, fp, eps); err == nil {
-		return s, pathP2P, nil
-	} else {
-		errs = append(errs, err)
-	}
-
-	if n.opts.Relay != nil {
-		rctx, cancel := context.WithTimeout(ctx, relayTimeout)
-		s, err := n.opts.Relay.DialViaRelay(rctx, machineID)
-		cancel()
-		if err == nil {
-			return s, pathRelay, nil
-		}
-		errs = append(errs, fmt.Errorf("relay: %w", err))
-	} else {
-		errs = append(errs, errors.New("relay: not configured"))
-	}
-
-	return nil, "", fmt.Errorf("loomnet: all dial tiers failed for %s: %w", machineID, errors.Join(errs...))
+	return n.Registry.DialLadder(ctx, machineID)
 }
 
 // dialResult carries one parallel direct-dial outcome.
@@ -92,8 +59,8 @@ type dialResult struct {
 	err error
 }
 
-// dialDirect races QUIC handshakes against every LAN+public candidate in
-// parallel; the first success wins and the losers are cancelled (§4.2).
+// dialDirect races QUIC handshakes against every LAN candidate in parallel;
+// the first success wins and the losers are cancelled (§4.2).
 func (n *Node) dialDirect(ctx context.Context, machineID, fp string, eps Endpoints) (*quicSession, error) {
 	cands := candidateAddrs(eps)
 	if len(cands) == 0 {
@@ -134,8 +101,8 @@ func drainSessions(ch <-chan dialResult, remaining int) {
 }
 
 // candidateAddrs expands a peer's endpoints into concrete UDP addresses: each
-// LAN entry paired with the overlay UDP port, plus the public reflexive address
-// (§4.1).
+// LAN entry paired with the overlay UDP port (§4.1). LAN-direct only — no
+// public/reflexive candidates.
 func candidateAddrs(eps Endpoints) []*net.UDPAddr {
 	var out []*net.UDPAddr
 	seen := map[string]bool{}
@@ -152,7 +119,6 @@ func candidateAddrs(eps Endpoints) []*net.UDPAddr {
 	for _, lan := range eps.LAN {
 		add(lan)
 	}
-	add(eps.Public)
 	return out
 }
 
@@ -190,27 +156,16 @@ func (n *Node) storeConn(machineID string, s Session, path string) {
 	n.pathsMu.Unlock()
 
 	// Evict from the cache when the underlying connection dies so the next dial
-	// re-runs the ladder (§3.4). Both tiers are watched; dialStream's retry on an
-	// OpenStream failure is the backstop.
-	switch cs := s.(type) {
-	case *quicSession:
+	// re-runs the ladder (§3.4); dialStream's retry on an OpenStream failure is
+	// the backstop.
+	if cs, ok := s.(*quicSession); ok {
 		go n.watchConn(machineID, cs)
-	case *relaySession:
-		go n.watchRelayConn(machineID, cs)
 	}
 }
 
 func (n *Node) watchConn(machineID string, s *quicSession) {
 	select {
 	case <-s.conn.Context().Done():
-	case <-n.ctx.Done():
-	}
-	n.evictConn(machineID, s)
-}
-
-func (n *Node) watchRelayConn(machineID string, s *relaySession) {
-	select {
-	case <-s.closed():
 	case <-n.ctx.Done():
 	}
 	n.evictConn(machineID, s)

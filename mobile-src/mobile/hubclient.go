@@ -21,11 +21,11 @@ import (
 
 // hubClient is the phone's minimal Hub client. It satisfies loomnet.Directory
 // (peer fingerprints + endpoints + the account trust set, from GET
-// /api/machines/peers) and loomnet.Signaler (hole-punch loom-offer/loom-answer
-// over the signaling WS), and fetches GET /api/overlay/config to build the
-// loomnet.RelayConfig. It mirrors the desktop hubconn.Client's overlay role but
-// imports only stdlib + gorilla/websocket so the whole package stays
-// gomobile-bindable.
+// /api/machines/peers) and keeps the signaling WS alive (the Hub derives
+// presence from WS liveness). It mirrors the desktop hubconn.Client's overlay
+// role but imports only stdlib + gorilla/websocket so the whole package stays
+// gomobile-bindable. LAN direct is the only connection method — there is no
+// relay config and no hole-punch signaling.
 type hubClient struct {
 	httpBase  string // normalized http(s):// base (no trailing slash)
 	wsURL     string // ws(s)://<host>/api/ws/signal
@@ -44,10 +44,6 @@ type hubClient struct {
 	// set after the node is built (setOverlayProvider).
 	provMu      sync.RWMutex
 	overlayProv func() (string, loomnet.Endpoints)
-
-	// Signaler plumbing.
-	signalCh chan loomnet.Signal // inbound loom-offer/answer to the node
-	sendCh   chan []byte         // outbound SignalMessages to the WS
 
 	stopOnce sync.Once
 	done     chan struct{}
@@ -76,13 +72,6 @@ type peerMachineInfo struct {
 	OverlayEndpoints   loomnet.Endpoints `json:"overlayEndpoints"`
 }
 
-// overlayConfigResp mirrors GET /api/overlay/config.
-type overlayConfigResp struct {
-	RelayQuicAddr    string `json:"relayQuicAddr"`
-	RelayWssURL      string `json:"relayWssUrl"`
-	RelayFingerprint string `json:"relayFingerprint"`
-}
-
 func newHubClient(hubBaseURL, machineID, token string) *hubClient {
 	base := strings.TrimRight(upgradeHubScheme(strings.TrimSpace(hubBaseURL)), "/")
 	return &hubClient{
@@ -92,8 +81,6 @@ func newHubClient(hubBaseURL, machineID, token string) *hubClient {
 		http:        &http.Client{Timeout: 15 * time.Second},
 		tok:         token,
 		peerOverlay: map[string]overlayPeer{},
-		signalCh:    make(chan loomnet.Signal, 64),
-		sendCh:      make(chan []byte, 256),
 		done:        make(chan struct{}),
 	}
 }
@@ -147,35 +134,6 @@ func (c *hubClient) AccountFingerprints() map[string]string {
 	return out
 }
 
-// ── loomnet.Signaler ─────────────────────────────────────────────────────────
-
-// SendSignal enqueues a hole-punch offer/answer to sig.To over the signaling WS.
-func (c *hubClient) SendSignal(_ context.Context, sig loomnet.Signal) error {
-	msg := signalMessage{Type: sig.Type, To: sig.To, Payload: json.RawMessage(sig.Payload)}
-	data, err := json.Marshal(msg)
-	if err != nil {
-		return fmt.Errorf("mobile: marshal signal: %w", err)
-	}
-	select {
-	case c.sendCh <- data:
-		return nil
-	default:
-		return fmt.Errorf("mobile: signal send buffer full")
-	}
-}
-
-// Signals returns inbound loom-offer/loom-answer routed to this node. The channel
-// lives for the client's lifetime (survives WS reconnects).
-func (c *hubClient) Signals() <-chan loomnet.Signal { return c.signalCh }
-
-func (c *hubClient) deliverSignal(sig loomnet.Signal) {
-	select {
-	case c.signalCh <- sig:
-	default:
-		log.Printf("[mobile] signal buffer full, dropping %s from %s", sig.Type, sig.From)
-	}
-}
-
 // ── lifecycle ────────────────────────────────────────────────────────────────
 
 // start launches the signaling-WS, heartbeat, and peer-poll loops for the node's
@@ -190,44 +148,7 @@ func (c *hubClient) stop() {
 	c.stopOnce.Do(func() { close(c.done) })
 }
 
-// ── REST: overlay config, peers, heartbeat ───────────────────────────────────
-
-// buildRelayConfig fetches GET /api/overlay/config and, mirroring the desktop's
-// buildRelayConfig, returns a RelayConfig only when the relay fingerprint is set
-// (else the overlay runs direct-only until the Hub advertises a configured relay).
-func (c *hubClient) buildRelayConfig(ctx context.Context) *loomnet.RelayConfig {
-	oc, err := c.fetchOverlayConfig(ctx)
-	if err != nil || oc == nil || strings.TrimSpace(oc.RelayFingerprint) == "" {
-		return nil
-	}
-	return &loomnet.RelayConfig{
-		QUICAddr:         oc.RelayQuicAddr,
-		WSSURL:           oc.RelayWssURL,
-		RelayFingerprint: oc.RelayFingerprint,
-		JWTProvider:      c.token,
-	}
-}
-
-func (c *hubClient) fetchOverlayConfig(ctx context.Context) (*overlayConfigResp, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.httpBase+"/api/overlay/config", nil)
-	if err != nil {
-		return nil, err
-	}
-	c.authorize(req)
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("fetch overlay config: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("fetch overlay config: status %d", resp.StatusCode)
-	}
-	var oc overlayConfigResp
-	if err := json.NewDecoder(resp.Body).Decode(&oc); err != nil {
-		return nil, fmt.Errorf("decode overlay config: %w", err)
-	}
-	return &oc, nil
-}
+// ── REST: peers, heartbeat ───────────────────────────────────────────────────
 
 // refreshPeers pulls GET /api/machines/peers and rebuilds the Directory cache
 // (fingerprint + endpoints, full replace).
@@ -265,9 +186,8 @@ func (c *hubClient) refreshPeers(ctx context.Context) error {
 // (in principle) dial us. Best-effort.
 func (c *hubClient) sendHeartbeat(ctx context.Context) {
 	payload := map[string]any{
-		"machineId":    c.machineID,
-		"status":       "online",
-		"connectivity": "relay",
+		"machineId": c.machineID,
+		"status":    "online", // wire compat with older hubs; new hubs ignore it
 	}
 	c.provMu.RLock()
 	prov := c.overlayProv
@@ -345,8 +265,8 @@ func (c *hubClient) peerPollLoop(ctx context.Context) {
 // ── signaling WebSocket ──────────────────────────────────────────────────────
 
 // wsLoop keeps one signaling WS alive, reconnecting with capped backoff, until
-// ctx or Stop. Inbound loom-offer/loom-answer are routed to the node's Signals();
-// SendSignal's queued frames are written by the per-connection write pump.
+// ctx or Stop. The WS carries no machine-to-machine signaling anymore — its job
+// is presence: the Hub marks this phone online while the socket lives.
 func (c *hubClient) wsLoop(ctx context.Context) {
 	backoff := time.Second
 	const maxBackoff = 30 * time.Second
@@ -423,12 +343,7 @@ func (c *hubClient) readPump(conn *websocket.Conn) {
 		if err := json.Unmarshal(data, &msg); err != nil {
 			continue
 		}
-		switch msg.Type {
-		case "loom-offer", "loom-answer":
-			c.deliverSignal(loomnet.Signal{Type: msg.Type, From: msg.From, Payload: msg.Payload})
-		default:
-			// presence / relay-data / legacy WebRTC: the phone ignores them.
-		}
+		_ = msg // presence / relay-data: the phone ignores every inbound type.
 	}
 }
 
@@ -441,11 +356,6 @@ func (c *hubClient) writePump(conn *websocket.Conn, connDone <-chan struct{}) {
 			return
 		case <-c.done:
 			return
-		case msg := <-c.sendCh:
-			conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-			if err := conn.WriteMessage(websocket.TextMessage, msg); err != nil {
-				return
-			}
 		case <-ticker.C:
 			conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 			if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {

@@ -21,10 +21,8 @@ const (
 	maxIncomingStreams = 1 << 16
 )
 
-// transport owns the single shared UDP socket and its quic.Transport. Per §3.1
-// every tier — direct dial, hole punch, and (later) the relay control/data
-// connections — multiplexes over this one socket, so the reflexive address the
-// relay observes is exactly the one QUIC punches with.
+// transport owns the single shared UDP socket and its quic.Transport (§3.1):
+// LAN-direct dialing and the inbound listener multiplex over this one socket.
 type transport struct {
 	acceptCtx context.Context // node lifetime; bounds inbound accepts and sessions
 	identity  *Identity
@@ -97,21 +95,6 @@ func (t *transport) dial(ctx context.Context, addr net.Addr, expectedFingerprint
 		return nil, err
 	}
 	return newQUICSession(t.acceptCtx, conn, gotID), nil
-}
-
-// dialRelayQUIC dials the relay's QUIC endpoint over the SHARED transport/socket
-// (§3.1, §4.4). Sharing the socket is load-bearing: the source address the relay
-// observes (returned in HELLO-OK) is then exactly the reflexive address QUIC hole
-// punching uses (§4.3). tlsConf carries the OUTER relay ALPN + cert pin — it is
-// NOT the peer mTLS config (the inner A↔B mTLS the relay never sees runs on top
-// of the spliced stream). The QUIC parameters (keepalive/idle) are reused so the
-// long-lived control connection stays warm.
-func (t *transport) dialRelayQUIC(ctx context.Context, addr net.Addr, tlsConf *tls.Config) (*quic.Conn, error) {
-	conn, err := t.qt.Dial(ctx, addr, tlsConf, t.quicConf)
-	if err != nil {
-		return nil, fmt.Errorf("loomnet: dial relay at %s: %w", addr, err)
-	}
-	return conn, nil
 }
 
 func (t *transport) close() {

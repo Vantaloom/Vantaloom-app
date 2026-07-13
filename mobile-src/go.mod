@@ -4,7 +4,6 @@ go 1.26
 
 require (
 	github.com/gorilla/websocket v1.5.3
-	github.com/hashicorp/yamux v0.1.2
 	github.com/quic-go/quic-go v0.60.0
 )
 

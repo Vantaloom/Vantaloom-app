@@ -7,8 +7,8 @@
 // serves inbound (LocalHandler=nil). This package therefore wraps a loomnet.Node
 // plus:
 //
-//   - a mini Hub client (hubclient.go) implementing loomnet.Directory +
-//     loomnet.Signaler and fetching /api/overlay/config → loomnet.RelayConfig;
+//   - a mini Hub client (hubclient.go) implementing loomnet.Directory and
+//     keeping the signaling WS alive (Hub-side presence);
 //   - a 127.0.0.1 loopback HTTP proxy (proxy.go) that rewrites requests to
 //     http://<target>.loom<path> and round-trips them over node.Transport(),
 //     streaming responses (SSE-safe) and tunnelling WebSocket upgrades.
@@ -53,7 +53,7 @@ type Bridge struct {
 	warm   *http.Client // over node.Transport(), for the Connect warm-up dial
 
 	state string // "idle" | "connecting" | "connected" | "error"
-	path  string // "direct" | "p2p" | "relay" (last established), for status
+	path  string // "direct" (last established), for status
 	err   string // last error message, for status
 }
 
@@ -71,9 +71,9 @@ func (b *Bridge) target() string {
 	return s
 }
 
-// StartNode builds the overlay node (Directory + Signaler = the mini Hub client;
-// RelayConfig from /api/overlay/config; LocalHandler=nil) and starts the loopback
-// proxy, returning once the proxy is listening. machineID MUST be the Hub-assigned
+// StartNode builds the overlay node (Directory = the mini Hub client;
+// LocalHandler=nil) and starts the loopback proxy, returning once the proxy is
+// listening. machineID MUST be the Hub-assigned
 // machine.id for this device (the value the Hub peer list keys on and pins for the
 // mTLS handshake) — NOT the raw SSAID. The frontend supplies it after registering
 // the device (hubAutoRegisterMachine → machine.id). Idempotent: a second call
@@ -99,15 +99,12 @@ func (b *Bridge) StartNode(dataDir, hubBaseURL, machineID, hubToken string) erro
 	// background poll refreshes it regardless.
 	initCtx, initCancel := context.WithTimeout(ctx, 6*time.Second)
 	_ = hub.refreshPeers(initCtx)
-	relayCfg := hub.buildRelayConfig(initCtx)
 	initCancel()
 
 	node, err := loomnet.New(loomnet.Options{
 		DataDir:      dataDir,
 		MachineID:    machineID,
-		Signaler:     hub,
 		Directory:    hub,
-		RelayConfig:  relayCfg,
 		LocalHandler: nil, // client-only: no inbound serving
 	})
 	if err != nil {
@@ -124,7 +121,7 @@ func (b *Bridge) StartNode(dataDir, hubBaseURL, machineID, hubToken string) erro
 	hub.setOverlayProvider(func() (string, loomnet.Endpoints) {
 		return node.Fingerprint(), node.LocalEndpoints()
 	})
-	hub.start(ctx) // WS signaling + heartbeat + peer-list poll loops
+	hub.start(ctx) // presence WS + heartbeat + peer-list poll loops
 
 	proxy := newLoopbackProxy(node, b.target)
 	if err := proxy.start(); err != nil {
@@ -225,9 +222,8 @@ func (b *Bridge) StatusJSON() string {
 	return string(data)
 }
 
-// SetToken rotates the Hub JWT used by the mini Hub client for REST auth, the
-// signaling WS, and the relay JWTProvider. Called from JS onToken as the token
-// refreshes.
+// SetToken rotates the Hub JWT used by the mini Hub client for REST auth and
+// the signaling WS. Called from JS onToken as the token refreshes.
 func (b *Bridge) SetToken(token string) {
 	b.mu.Lock()
 	hub := b.hub
