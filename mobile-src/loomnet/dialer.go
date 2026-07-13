@@ -121,12 +121,17 @@ func (r *DialerRegistry) DialLadder(ctx context.Context, peerID string) (Session
 func (r *DialerRegistry) PeerReachability(ctx context.Context, peerID string, activePath string) []MethodStatus {
 	dialers := r.snapshot()
 
-	// The active dialer's label, for the "why not chosen" copy.
+	// The active dialer's label, for the "why not chosen" copy. An adopted
+	// inbound connection (对方拨入并被复用，0.14.3) is not a dialer — give it
+	// its own label so the copy stays truthful.
 	activeLabel := ""
 	for _, d := range dialers {
 		if d.Name() == activePath {
 			activeLabel = d.Label()
 		}
+	}
+	if activePath == pathInbound {
+		activeLabel = "入站连接复用（对方拨入）"
 	}
 
 	out := make([]MethodStatus, len(dialers))
@@ -163,6 +168,8 @@ func activePathDetail(name string) string {
 		return "正在使用：局域网内 QUIC 直连（mTLS 指纹双向校验），不经过任何服务器。"
 	case pathPublic:
 		return "正在使用：经对方公网地址的 QUIC 直连（mTLS 指纹双向校验），不经过任何服务器。"
+	case pathReverse, pathInbound:
+		return "正在使用：对方主动建立的直连连接（QUIC 双向复用，mTLS 指纹双向校验），不经过任何服务器。"
 	default:
 		return "正在使用此连接方式。"
 	}
@@ -252,6 +259,62 @@ func (d *publicDialer) Dial(ctx context.Context, peerID string) (Session, error)
 		return nil, fmt.Errorf("loomnet: no directory entry for %s", peerID)
 	}
 	return d.n.dialPublic(ctx, peerID, fp, eps)
+}
+
+// reverseDialer is the 反向公网直连 method（0.14.3 第三方式）：本机正向拨不通
+// 对方、但本机自己配置了公网直连时，经 Hub 信令请对方反拨本机——QUIC 连接
+// 双向复用，单侧可公网直连即可互通。信任模型不变：对方反拨仍按 Hub 目录里
+// 本机的指纹做 mTLS 钉扎，Hub 只转发一条「请拨我」的信令，看不到任何流量。
+// Priority 30：仅在 LAN 直连与正向公网直连都不可用/失败后才尝试。
+type reverseDialer struct{ n *Node }
+
+func (d *reverseDialer) Name() string  { return pathReverse }
+func (d *reverseDialer) Label() string { return "反向公网直连" }
+func (d *reverseDialer) Priority() int { return 30 }
+
+func (d *reverseDialer) Available(ctx context.Context, peerID string) bool {
+	ok, _ := d.Explain(ctx, peerID)
+	return ok
+}
+
+func (d *reverseDialer) Explain(_ context.Context, peerID string) (bool, string) {
+	if d.n.opts.PublicAdvertise == "" {
+		return false, "本机未配置公网直连，无法请对方反拨本机。任一方在 设置→网络与设备→公网直连 开启后，双方即可互通（另一方无需公网）。"
+	}
+	if d.n.reverseRequester() == nil {
+		return false, "Hub 信令未接入（未登录 Hub 或运行时尚未完成接线），无法发送反拨请求。"
+	}
+	if _, _, ok := d.n.opts.Directory.PeerInfo(peerID); !ok {
+		return false, "尚未从 Hub 获取到对方的信息，无法确认其在线状态。"
+	}
+	return true, fmt.Sprintf("本机已配置公网直连 %s；若对方在线（信令可达）且版本 ≥0.14.3，将请其反拨本机建立连接。", d.n.opts.PublicAdvertise)
+}
+
+func (d *reverseDialer) Dial(ctx context.Context, peerID string) (Session, error) {
+	request := d.n.reverseRequester()
+	if request == nil {
+		return nil, errors.New("loomnet: reverse: Hub 信令未接入")
+	}
+	dctx, cancel := context.WithTimeout(ctx, reverseTimeout)
+	defer cancel()
+
+	// 先挂等待者再查缓存：对方的连接可能在梯队前两级期间已经拨入。
+	waiter := d.n.registerReverseWaiter(peerID)
+	defer d.n.unregisterReverseWaiter(peerID, waiter)
+	if s := d.n.cachedConn(peerID); s != nil {
+		return s, nil
+	}
+
+	if err := request(dctx, peerID); err != nil {
+		return nil, fmt.Errorf("反拨信令未送达：%w", err)
+	}
+
+	select {
+	case s := <-waiter:
+		return s, nil
+	case <-dctx.Done():
+		return nil, fmt.Errorf("已请求对方反拨，但 %s 内未等到对方的连接。对方需在线、版本 ≥0.14.3，且能拨通本机公网地址 %s（确认本机 UDP 端口已在防火墙/安全组放行）", reverseTimeout, d.n.opts.PublicAdvertise)
+	}
 }
 
 // localLANNets enumerates this host's non-loopback, non-link-local unicast

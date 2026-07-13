@@ -84,6 +84,14 @@ type Node struct {
 
 	// Registry holds all pluggable dial methods in priority order.
 	Registry *DialerRegistry
+
+	// 反向互通（0.14.3）：reverseRequest 是「经 Hub 信令请 peer 反拨本机」的
+	// 注入口（server 层接 hubconn；nil = 信令未接入，reverse 拨号器不可用）。
+	// reverseWaiters 是按机器 id 排队的一次性等待者——storeConn 落任何一条到
+	// 该机器的活连接都会满足它们。
+	reverseRequest func(ctx context.Context, peerID string) error
+	reverseMu      sync.Mutex
+	reverseWaiters map[string][]chan Session
 }
 
 // New builds a Node and loads/creates its overlay identity. Start must be called
@@ -111,11 +119,12 @@ func New(opts Options) (*Node, error) {
 		return nil, err
 	}
 	n := &Node{
-		opts:     opts,
-		identity: id,
-		conns:    map[string]Session{},
-		paths:    map[string]string{},
-		Registry: NewDialerRegistry(),
+		opts:           opts,
+		identity:       id,
+		conns:          map[string]Session{},
+		paths:          map[string]string{},
+		Registry:       NewDialerRegistry(),
+		reverseWaiters: map[string][]chan Session{},
 	}
 	n.rt = &http.Transport{
 		DialContext:           n.dialStream,
@@ -142,7 +151,9 @@ func (n *Node) Start(ctx context.Context) error {
 	}
 	n.tr = tr
 
-	ln, err := tr.listen()
+	// 入站连接注册回调（0.14.3 反向互通）：mTLS 验证过的入站连接同时登记为
+	// 到该对端的可复用出站会话。
+	ln, err := tr.listen(func(s *quicSession) { n.adoptInbound(s) })
 	if err != nil {
 		n.cancel()
 		tr.close()
@@ -156,15 +167,92 @@ func (n *Node) Start(ctx context.Context) error {
 	}
 	go func() { _ = n.httpSrv.Serve(ln) }()
 
-	// Register the built-in dial methods in priority order: LAN direct (10)
-	// then 公网直连 (20; dials a peer's explicitly configured public address).
-	// Further methods (hole punch, relay, …) are added one at a time via
+	// Register the built-in dial methods in priority order: LAN direct (10)，
+	// 公网直连 (20; dials a peer's explicitly configured public address)，
+	// 反向公网直连 (30; 0.14.3——本机可公网直连时经 Hub 信令请对方反拨，
+	// 单侧可达即可互通)。Further methods are added one at a time via
 	// n.Registry.Register() once they meet the production bar — see
 	// docs/network-connectivity-redesign.md §8.
 	n.Registry.Register(&directDialer{n: n})
 	n.Registry.Register(&publicDialer{n: n})
+	n.Registry.Register(&reverseDialer{n: n})
 
 	return nil
+}
+
+// SetReverseRequester injects the「请对方反拨」signal sender (server wiring →
+// hubconn). fn must send the reverse-connect signal to peerID and return nil
+// once it is on its way (or an immediate, human-readable error: Hub 断连 /
+// 对方不在线 nack). Safe to call before Start; nil disables the reverse dialer.
+func (n *Node) SetReverseRequester(fn func(ctx context.Context, peerID string) error) {
+	n.reverseMu.Lock()
+	n.reverseRequest = fn
+	n.reverseMu.Unlock()
+}
+
+func (n *Node) reverseRequester() func(ctx context.Context, peerID string) error {
+	n.reverseMu.Lock()
+	defer n.reverseMu.Unlock()
+	return n.reverseRequest
+}
+
+// DialBack handles a peer's reverse-connect request (0.14.3 反向互通)：the
+// requester (fromID) says it cannot reach us but WE can reach it. Run our own
+// direct+public ladder toward it — explicitly NOT the full registry (the
+// reverse dialer would signal back and loop). hintPublic is the requester's
+// self-reported public address, used only when our directory has no public
+// entry for it yet (fingerprint pinning still comes from the directory, so a
+// forged hint cannot impersonate the peer). The established connection is
+// stored (both sides reuse it); errors are returned for the caller to log —
+// the requester times out on its own if we fail.
+func (n *Node) DialBack(ctx context.Context, fromID, hintPublic string) error {
+	if n.tr == nil {
+		return errors.New("loomnet: node not started")
+	}
+	// 缓存里已有到请求方的连接？一条活的 QUIC 连接在两侧都已登记（出站经
+	// storeConn、入站经 adoptInbound），对方若真有活连接就不会发反拨请求——
+	// 所以这里的缓存命中大概率是本侧还没检测到死亡的僵尸。开一条探测流验证：
+	// 活 → 对方那侧也有（它的等待者会在注册后复查缓存命中），无需新拨；
+	// 死 → 清掉缓存走全新拨号。
+	if s := n.cachedConn(fromID); s != nil {
+		probeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		st, perr := s.OpenStream(probeCtx)
+		cancel()
+		if perr == nil {
+			_ = st.Close()
+			return nil
+		}
+		n.evictConn(fromID, s)
+	}
+	_, err := n.dials.do("dialback:"+fromID, func() (Session, error) {
+		if s := n.cachedConn(fromID); s != nil {
+			return s, nil
+		}
+		fp, eps, ok := n.opts.Directory.PeerInfo(fromID)
+		if !ok {
+			return nil, fmt.Errorf("loomnet: dialback: 本机目录中没有 %s 的信息（Hub 目录未刷新？）", fromID)
+		}
+		if eps.Public == "" && hintPublic != "" {
+			// 对方刚开启公网直连、本机目录还没刷到——用它自报的地址补位。
+			// 指纹仍取自 Hub 目录，地址伪造无法通过 mTLS 钉扎。
+			eps.Public = hintPublic
+		}
+		var errs []error
+		if s, derr := n.dialDirect(ctx, fromID, fp, eps); derr == nil {
+			n.storeConn(fromID, s, pathDirect)
+			return s, nil
+		} else {
+			errs = append(errs, derr)
+		}
+		if s, derr := n.dialPublic(ctx, fromID, fp, eps); derr == nil {
+			n.storeConn(fromID, s, pathPublic)
+			return s, nil
+		} else {
+			errs = append(errs, derr)
+		}
+		return nil, fmt.Errorf("loomnet: dialback 至 %s 失败: %w", fromID, errors.Join(errs...))
+	})
+	return err
 }
 
 // Stop tears down the node: cancels its context, closes the HTTP server,
@@ -259,9 +347,22 @@ func (n *Node) livePathCounts() map[string]int {
 
 // PeerReachability returns per-method availability for a peer, plus which
 // method is currently active (has a LIVE cached session). Powers the topology
-// UI's connection-method badges.
+// UI's connection-method badges. An adopted inbound connection（对方拨入被
+// 复用，0.14.3）is not a dialer — surface it as its own synthetic row so the
+// "正在使用" state never disappears from the UI.
 func (n *Node) PeerReachability(ctx context.Context, peerID string) []MethodStatus {
-	return n.Registry.PeerReachability(ctx, peerID, n.ActivePath(peerID))
+	active := n.ActivePath(peerID)
+	out := n.Registry.PeerReachability(ctx, peerID, active)
+	if active == pathInbound {
+		out = append(out, MethodStatus{
+			Name:      pathInbound,
+			Label:     "入站连接复用",
+			Available: true,
+			Active:    true,
+			Detail:    activePathDetail(pathInbound),
+		})
+	}
+	return out
 }
 
 // SelfReachability describes the LOCAL node's own connection-method surface for
@@ -287,9 +388,9 @@ func (n *Node) SelfReachability() []MethodStatus {
 	switch {
 	case eps.Public != "":
 		public.Available = true
-		public.Detail = fmt.Sprintf("已配置公网直连地址 %s（本机实际监听 UDP 端口 %d）。任意网络的机器可经此直连本机——请确保该 UDP 端口已在系统防火墙与云安全组放行，且端口转发（如有）指向本机。", eps.Public, eps.UDPPort)
+		public.Detail = fmt.Sprintf("已配置公网直连地址 %s（本机实际监听 UDP 端口 %d）。任意网络的机器可经此直连本机；本机主动访问不同网络的机器时也会自动请其反拨本机（反向公网直连，0.14.3）——单侧可公网直连即可互通。请确保该 UDP 端口已在系统防火墙与云安全组放行，且端口转发（如有）指向本机。", eps.Public, eps.UDPPort)
 	default:
-		public.Detail = "未配置。拥有公网 IP 或已做端口转发的机器（如云服务器）可在 设置→网络与设备→公网直连 开启：固定 UDP 端口并填写公网地址，跨网络的机器即可直连本机。"
+		public.Detail = "未配置。拥有公网 IP 或已做端口转发的机器（如云服务器）可在 设置→网络与设备→公网直连 开启：固定 UDP 端口并填写公网地址，跨网络的机器即可直连本机；且只要任一方开启，双方即可互通（反向公网直连）。"
 	}
 	if public.Active {
 		public.Detail = fmt.Sprintf("当前有 %d 条活跃连接经此方式通信。", inUse[pathPublic]) + " " + public.Detail

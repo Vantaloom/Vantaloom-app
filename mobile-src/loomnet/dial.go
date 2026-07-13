@@ -12,16 +12,23 @@ import (
 
 // Per-tier budgets for a single dial attempt (§4.6). QUIC handshakes are fast,
 // so these are tighter than the legacy easytier ladder; the public tier gets a
-// little more headroom for real internet RTTs.
+// little more headroom for real internet RTTs. The reverse tier covers a full
+// signal round trip PLUS the peer's own dial-back ladder (direct 3s + public
+// 4s), so it is the widest.
 const (
-	directTimeout = 3 * time.Second
-	publicTimeout = 4 * time.Second
+	directTimeout  = 3 * time.Second
+	publicTimeout  = 4 * time.Second
+	reverseTimeout = 9 * time.Second
 )
 
 // Last-path labels reported by LastPath for the topology UI (§4.6, §7.4).
+// pathInbound marks a connection the PEER established that we adopted for
+// outbound reuse (反向互通/入站复用，0.14.3)。
 const (
-	pathDirect = "direct"
-	pathPublic = "public"
+	pathDirect  = "direct"
+	pathPublic  = "public"
+	pathReverse = "reverse"
+	pathInbound = "inbound"
 )
 
 // getOrDialConn returns a live Session to machineID, reusing the cached one or
@@ -226,6 +233,70 @@ func (n *Node) storeConn(machineID string, s Session, path string) {
 	// the backstop.
 	if cs, ok := s.(*quicSession); ok {
 		go n.watchConn(machineID, cs)
+	}
+
+	// 双向复用（0.14.3）：出站连接上对方开的流同样要进本机 http server（QUIC
+	// 连接天然双向；没有这一步，对方经反向互通复用我们的出站连接发请求会被
+	// 无人 Accept 而挂死）。入站连接由 listener 自己 demux，不重复。
+	if path != pathInbound {
+		if cs, ok := s.(*quicSession); ok && n.listener != nil {
+			go n.listener.demux(cs.conn, machineID)
+		}
+	}
+
+	// 反向等待者：本机 reverse 拨号器正等着这台机器的连接（我们发了信令请它
+	// 拨入/我们拨通了它）——任何一条到该机器的活连接都满足需求。
+	n.notifyReverseWaiters(machineID, s)
+}
+
+// adoptInbound registers a VERIFIED inbound connection as a reusable outbound
+// session to its peer (反向互通/入站复用，0.14.3): QUIC connections are fully
+// bidirectional, so once the peer dialed us there is no reason to dial back —
+// requests toward that peer ride the same connection. The listener has already
+// demuxed the connection's inbound streams into the http server; this only
+// registers the OUTBOUND direction. Replaces any cached session (the inbound
+// one is live RIGHT NOW; a possibly-zombie predecessor dies via idle timeout).
+func (n *Node) adoptInbound(s *quicSession) {
+	n.storeConn(s.RemoteMachineID(), s, pathInbound)
+}
+
+// --- reverse-connect waiters (0.14.3 反向互通) -------------------------------
+
+// registerReverseWaiter arms a one-shot channel that notifyReverseWaiters
+// (called from storeConn) fulfills when ANY live session to machineID lands.
+func (n *Node) registerReverseWaiter(machineID string) chan Session {
+	ch := make(chan Session, 1)
+	n.reverseMu.Lock()
+	n.reverseWaiters[machineID] = append(n.reverseWaiters[machineID], ch)
+	n.reverseMu.Unlock()
+	return ch
+}
+
+func (n *Node) unregisterReverseWaiter(machineID string, ch chan Session) {
+	n.reverseMu.Lock()
+	waiters := n.reverseWaiters[machineID]
+	for i, w := range waiters {
+		if w == ch {
+			n.reverseWaiters[machineID] = append(waiters[:i], waiters[i+1:]...)
+			break
+		}
+	}
+	if len(n.reverseWaiters[machineID]) == 0 {
+		delete(n.reverseWaiters, machineID)
+	}
+	n.reverseMu.Unlock()
+}
+
+func (n *Node) notifyReverseWaiters(machineID string, s Session) {
+	n.reverseMu.Lock()
+	waiters := n.reverseWaiters[machineID]
+	delete(n.reverseWaiters, machineID)
+	n.reverseMu.Unlock()
+	for _, ch := range waiters {
+		select {
+		case ch <- s:
+		default:
+		}
 	}
 }
 

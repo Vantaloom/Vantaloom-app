@@ -111,7 +111,9 @@ func (t *transport) close() {
 // quicListener adapts inbound QUIC connections into a net.Listener that yields
 // one net.Conn per accepted stream (§3.3), so vantaloom-api can serve overlay
 // requests with the same mux as local requests. Each yielded conn carries the
-// peer's mTLS-verified machineID for X-Loom-From stamping.
+// peer's mTLS-verified machineID for X-Loom-From stamping. onConn (0.14.3
+// 反向互通) is invoked for every verified inbound connection so the node can
+// adopt it as a reusable outbound session to that peer.
 type quicListener struct {
 	tr       *transport
 	ln       *quic.Listener
@@ -119,9 +121,17 @@ type quicListener struct {
 	accepted chan net.Conn
 	closed   chan struct{}
 	once     sync.Once
+	onConn   func(*quicSession)
+
+	// demuxed guards against double-demuxing one QUIC connection（0.14.3 双向
+	// 复用后同一条连接可能同时经 入站 accept 与 出站 storeConn 两条路径请求
+	// demux——两个 AcceptStream 循环会把流瓜分到两个 goroutine，功能上无害但
+	// 浪费；这里让后到者直接成为 no-op）。
+	demuxMu sync.Mutex
+	demuxed map[*quic.Conn]struct{}
 }
 
-func (t *transport) listen() (*quicListener, error) {
+func (t *transport) listen(onConn func(*quicSession)) (*quicListener, error) {
 	ln, err := t.qt.Listen(t.serverTLS(), t.quicConf)
 	if err != nil {
 		return nil, fmt.Errorf("loomnet: start overlay listener: %w", err)
@@ -132,6 +142,8 @@ func (t *transport) listen() (*quicListener, error) {
 		ctx:      t.acceptCtx,
 		accepted: make(chan net.Conn),
 		closed:   make(chan struct{}),
+		onConn:   onConn,
+		demuxed:  map[*quic.Conn]struct{}{},
 	}
 	go l.acceptConns()
 	return l, nil
@@ -148,14 +160,29 @@ func (l *quicListener) acceptConns() {
 			_ = conn.CloseWithError(quic.ApplicationErrorCode(1), "missing identity")
 			continue
 		}
+		if l.onConn != nil {
+			l.onConn(newQUICSession(l.ctx, conn, id))
+		}
 		go l.demux(conn, id)
 	}
 }
 
 // demux turns every stream a peer opens on one QUIC connection into a separate
 // net.Conn handed to Accept, so http.Server treats each stream as its own HTTP
-// connection.
+// connection. Idempotent per connection (see demuxed).
 func (l *quicListener) demux(conn *quic.Conn, id string) {
+	l.demuxMu.Lock()
+	if _, dup := l.demuxed[conn]; dup {
+		l.demuxMu.Unlock()
+		return
+	}
+	l.demuxed[conn] = struct{}{}
+	l.demuxMu.Unlock()
+	defer func() {
+		l.demuxMu.Lock()
+		delete(l.demuxed, conn)
+		l.demuxMu.Unlock()
+	}()
 	for {
 		st, err := conn.AcceptStream(l.ctx)
 		if err != nil {
