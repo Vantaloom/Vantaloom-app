@@ -184,6 +184,11 @@ func (n *Node) Transport() http.RoundTripper { return n.rt }
 // handshake (§2.1, §6.2).
 func (n *Node) Fingerprint() string { return n.identity.Fingerprint() }
 
+// MachineID is the stable overlay identity this node was built for (the cert
+// CN). /v1/hub/connect compares it with the effective machine ID to decide
+// whether the node must be rebuilt on a runtime Hub/machine switch.
+func (n *Node) MachineID() string { return n.opts.MachineID }
+
 // LocalEndpoints reports this node's overlay dial candidates for the Hub
 // heartbeat (§6.2): local LAN IPs and the bound UDP port.
 func (n *Node) LocalEndpoints() Endpoints {

@@ -196,7 +196,7 @@ func (d *directDialer) Available(ctx context.Context, peerID string) bool {
 func (d *directDialer) Explain(_ context.Context, peerID string) (bool, string) {
 	_, eps, ok := d.n.opts.Directory.PeerInfo(peerID)
 	if !ok {
-		return false, "尚未从 Hub 获取到对方的 overlay 信息。需要本机已登录 Hub，且对方在线并运行 0.13 及以上版本。"
+		return false, "尚未从 Hub 获取到对方的 overlay 连接信息。对方需在线并运行 0.13.7 及以上版本（0.13.6 存在应用内重新登录后停止上报连接信息的缺陷，升级后自动恢复）；本机每 60 秒自动刷新一次对方信息。"
 	}
 	cands := candidateAddrs(eps)
 	if len(cands) == 0 {

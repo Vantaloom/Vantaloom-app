@@ -87,7 +87,15 @@ func (n *Node) dialDirect(ctx context.Context, machineID, fp string, eps Endpoin
 		}
 		errs = append(errs, r.err)
 	}
-	return nil, fmt.Errorf("loomnet: direct: %w", errors.Join(errs...))
+	// Every candidate failed. Attach the most likely CAUSE (judged by subnet
+	// overlap) so the UI shows an actionable reason, not just raw per-address
+	// handshake errors: same-subnet timeouts are almost always AP/client
+	// isolation or a peer-side firewall, never a code path worth retrying.
+	hint := "对方地址与本机任一网段均不重叠——两台机器不在同一局域网（当前版本仅支持局域网直连）"
+	if firstSameSubnet(localLANNets(), eps.LAN) != "" {
+		hint = "与对方已处于同一网段但仍未拨通——常见原因：路由器开启了客户端/AP 隔离（校园网、公司网常见，可用手机热点验证），或对方系统防火墙拦截了 UDP 入站（Windows 需放行 vantaloom-api；macOS 需在 系统设置→隐私与安全性→本地网络 中允许 Vantaloom）"
+	}
+	return nil, fmt.Errorf("loomnet: direct: %s。逐地址结果：%w", hint, errors.Join(errs...))
 }
 
 // drainSessions closes any sessions that finished their handshake after a winner
