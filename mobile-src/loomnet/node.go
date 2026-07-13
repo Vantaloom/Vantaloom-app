@@ -88,10 +88,10 @@ type Node struct {
 	// 反向互通（0.14.3）：reverseRequest 是「经 Hub 信令请 peer 反拨本机」的
 	// 注入口（server 层接 hubconn；nil = 信令未接入，reverse 拨号器不可用）。
 	// reverseWaiters 是按机器 id 排队的一次性等待者——storeConn 落任何一条到
-	// 该机器的活连接都会满足它们。
+	// 该机器的活连接、或对方回报反拨失败（0.14.4 富错误闭环），都会终结它们。
 	reverseRequest func(ctx context.Context, peerID string) error
 	reverseMu      sync.Mutex
-	reverseWaiters map[string][]chan Session
+	reverseWaiters map[string][]reverseWaiter
 }
 
 // New builds a Node and loads/creates its overlay identity. Start must be called
@@ -124,7 +124,7 @@ func New(opts Options) (*Node, error) {
 		conns:          map[string]Session{},
 		paths:          map[string]string{},
 		Registry:       NewDialerRegistry(),
-		reverseWaiters: map[string][]chan Session{},
+		reverseWaiters: map[string][]reverseWaiter{},
 	}
 	n.rt = &http.Transport{
 		DialContext:           n.dialStream,
@@ -194,6 +194,20 @@ func (n *Node) reverseRequester() func(ctx context.Context, peerID string) error
 	n.reverseMu.Lock()
 	defer n.reverseMu.Unlock()
 	return n.reverseRequest
+}
+
+// NotifyReverseOutcome ingests the peer's dial-back result（0.14.4，经 Hub 信令
+// reverse-connect-result 回传）。失败 → 立即以对方侧的原样报错终结所有等待者
+// （不再干等 9s 超时）；成功 → 不做事——成功的信号是连接本身：对方拨入的
+// QUIC 连接经 adoptInbound/storeConn 落地时已满足等待者，ok 结果只是尾灯。
+func (n *Node) NotifyReverseOutcome(peerID string, ok bool, reason string) {
+	if ok {
+		return
+	}
+	if strings.TrimSpace(reason) == "" {
+		reason = "对方未说明原因"
+	}
+	n.failReverseWaiters(peerID, reason)
 }
 
 // DialBack handles a peer's reverse-connect request (0.14.3 反向互通)：the

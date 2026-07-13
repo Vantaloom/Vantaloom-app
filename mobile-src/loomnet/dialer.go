@@ -279,6 +279,12 @@ func (d *reverseDialer) Available(ctx context.Context, peerID string) bool {
 
 func (d *reverseDialer) Explain(_ context.Context, peerID string) (bool, string) {
 	if d.n.opts.PublicAdvertise == "" {
+		// 方向感知（0.14.4）：反拨解决的是「本机可被公网直连、对方不可」的
+		// 方向。对方已有公网时，本机→对方走正向「公网直连」即可——此时把
+		// 「本机未配置公网」当缺陷提示纯属误导（三机拓扑显示不一致的根源）。
+		if _, eps, ok := d.n.opts.Directory.PeerInfo(peerID); ok && eps.Public != "" {
+			return false, fmt.Sprintf("无需反拨：对方已配置公网直连（%s），本机可经「公网直连」正向直达。反拨只服务反方向（对方拨不通本机、而本机可被公网直连）的场景。", eps.Public)
+		}
 		return false, "本机未配置公网直连，无法请对方反拨本机。任一方在 设置→网络与设备→公网直连 开启后，双方即可互通（另一方无需公网）。"
 	}
 	if d.n.reverseRequester() == nil {
@@ -310,10 +316,14 @@ func (d *reverseDialer) Dial(ctx context.Context, peerID string) (Session, error
 	}
 
 	select {
-	case s := <-waiter:
+	case s := <-waiter.conn:
 		return s, nil
+	case reason := <-waiter.fail:
+		// 对方（≥0.14.4）回报了反拨失败——带对方侧原样报错立即失败，
+		// 不再干等超时。典型形态：对方出站 UDP 被防火墙/安全组阻断。
+		return nil, fmt.Errorf("对方已收到反拨请求并尝试回拨本机 %s，但失败（对方侧报错原样）：%s", d.n.opts.PublicAdvertise, reason)
 	case <-dctx.Done():
-		return nil, fmt.Errorf("已请求对方反拨，但 %s 内未等到对方的连接。对方需在线、版本 ≥0.14.3，且能拨通本机公网地址 %s（确认本机 UDP 端口已在防火墙/安全组放行）", reverseTimeout, d.n.opts.PublicAdvertise)
+		return nil, fmt.Errorf("已请求对方反拨，但 %s 内未等到对方的连接，也未收到对方的失败回报（对方 ≥0.14.4 会即时回报失败原因；未回报=对方版本较旧或其回拨仍未完成）。对方需在线且能拨通本机公网地址 %s（确认本机 UDP 端口已在防火墙/安全组放行）", reverseTimeout, d.n.opts.PublicAdvertise)
 	}
 }
 

@@ -262,21 +262,31 @@ func (n *Node) adoptInbound(s *quicSession) {
 
 // --- reverse-connect waiters (0.14.3 反向互通) -------------------------------
 
-// registerReverseWaiter arms a one-shot channel that notifyReverseWaiters
-// (called from storeConn) fulfills when ANY live session to machineID lands.
-func (n *Node) registerReverseWaiter(machineID string) chan Session {
-	ch := make(chan Session, 1)
-	n.reverseMu.Lock()
-	n.reverseWaiters[machineID] = append(n.reverseWaiters[machineID], ch)
-	n.reverseMu.Unlock()
-	return ch
+// reverseWaiter is a one-shot waiter armed by the reverse dialer: conn is
+// fulfilled by notifyReverseWaiters when ANY live session to the peer lands;
+// fail is fulfilled by failReverseWaiters when the peer reports back（经 Hub
+// 信令，0.14.4）that its dial-back FAILED — carrying the peer-side verbatim
+// error so the requester fails fast with the real reason instead of a blind
+// timeout.
+type reverseWaiter struct {
+	conn chan Session
+	fail chan string
 }
 
-func (n *Node) unregisterReverseWaiter(machineID string, ch chan Session) {
+// registerReverseWaiter arms a one-shot waiter for machineID.
+func (n *Node) registerReverseWaiter(machineID string) reverseWaiter {
+	w := reverseWaiter{conn: make(chan Session, 1), fail: make(chan string, 1)}
+	n.reverseMu.Lock()
+	n.reverseWaiters[machineID] = append(n.reverseWaiters[machineID], w)
+	n.reverseMu.Unlock()
+	return w
+}
+
+func (n *Node) unregisterReverseWaiter(machineID string, w reverseWaiter) {
 	n.reverseMu.Lock()
 	waiters := n.reverseWaiters[machineID]
-	for i, w := range waiters {
-		if w == ch {
+	for i, cand := range waiters {
+		if cand.conn == w.conn {
 			n.reverseWaiters[machineID] = append(waiters[:i], waiters[i+1:]...)
 			break
 		}
@@ -292,9 +302,24 @@ func (n *Node) notifyReverseWaiters(machineID string, s Session) {
 	waiters := n.reverseWaiters[machineID]
 	delete(n.reverseWaiters, machineID)
 	n.reverseMu.Unlock()
-	for _, ch := range waiters {
+	for _, w := range waiters {
 		select {
-		case ch <- s:
+		case w.conn <- s:
+		default:
+		}
+	}
+}
+
+// failReverseWaiters delivers a peer-reported dial-back failure to every
+// waiter for machineID. reason is the PEER's verbatim error（对方侧报错原样）.
+func (n *Node) failReverseWaiters(machineID, reason string) {
+	n.reverseMu.Lock()
+	waiters := n.reverseWaiters[machineID]
+	delete(n.reverseWaiters, machineID)
+	n.reverseMu.Unlock()
+	for _, w := range waiters {
+		select {
+		case w.fail <- reason:
 		default:
 		}
 	}
