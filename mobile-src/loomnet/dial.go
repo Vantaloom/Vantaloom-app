@@ -11,14 +11,17 @@ import (
 )
 
 // Per-tier budgets for a single dial attempt (§4.6). QUIC handshakes are fast,
-// so these are tighter than the legacy easytier ladder.
+// so these are tighter than the legacy easytier ladder; the public tier gets a
+// little more headroom for real internet RTTs.
 const (
 	directTimeout = 3 * time.Second
+	publicTimeout = 4 * time.Second
 )
 
 // Last-path labels reported by LastPath for the topology UI (§4.6, §7.4).
 const (
 	pathDirect = "direct"
+	pathPublic = "public"
 )
 
 // getOrDialConn returns a live Session to machineID, reusing the cached one or
@@ -59,14 +62,17 @@ type dialResult struct {
 	err error
 }
 
-// dialDirect races QUIC handshakes against every LAN candidate in parallel;
-// the first success wins and the losers are cancelled (§4.2).
-func (n *Node) dialDirect(ctx context.Context, machineID, fp string, eps Endpoints) (*quicSession, error) {
-	cands := candidateAddrs(eps)
-	if len(cands) == 0 {
-		return nil, errors.New("loomnet: direct: no candidate addresses")
-	}
-	dctx, cancel := context.WithTimeout(ctx, directTimeout)
+// raceCandidates races QUIC handshakes against every candidate in parallel;
+// the first success wins and the losers are cancelled (§4.2). Shared by the
+// LAN-direct and 公网直连 dialers — the transport/mTLS layer is identical,
+// only the address source differs.
+func (n *Node) raceCandidates(
+	ctx context.Context,
+	machineID, fp string,
+	cands []*net.UDPAddr,
+	budget time.Duration,
+) (*quicSession, error) {
+	dctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
 
 	ch := make(chan dialResult, len(cands))
@@ -87,15 +93,49 @@ func (n *Node) dialDirect(ctx context.Context, machineID, fp string, eps Endpoin
 		}
 		errs = append(errs, r.err)
 	}
+	return nil, errors.Join(errs...)
+}
+
+// dialDirect races QUIC handshakes against every LAN candidate in parallel.
+func (n *Node) dialDirect(ctx context.Context, machineID, fp string, eps Endpoints) (*quicSession, error) {
+	cands := candidateAddrs(eps)
+	if len(cands) == 0 {
+		return nil, errors.New("loomnet: direct: no candidate addresses")
+	}
+	s, err := n.raceCandidates(ctx, machineID, fp, cands, directTimeout)
+	if err == nil {
+		return s, nil
+	}
 	// Every candidate failed. Attach the most likely CAUSE (judged by subnet
 	// overlap) so the UI shows an actionable reason, not just raw per-address
 	// handshake errors: same-subnet timeouts are almost always AP/client
 	// isolation or a peer-side firewall, never a code path worth retrying.
-	hint := "对方地址与本机任一网段均不重叠——两台机器不在同一局域网（当前版本仅支持局域网直连）"
+	hint := "对方地址与本机任一网段均不重叠——两台机器不在同一局域网"
 	if firstSameSubnet(localLANNets(), eps.LAN) != "" {
 		hint = "与对方已处于同一网段但仍未拨通——常见原因：路由器开启了客户端/AP 隔离（校园网、公司网常见，可用手机热点验证），或对方系统防火墙拦截了 UDP 入站（Windows 需放行 vantaloom-api；macOS 需在 系统设置→隐私与安全性→本地网络 中允许 Vantaloom）"
 	}
-	return nil, fmt.Errorf("loomnet: direct: %s。逐地址结果：%w", hint, errors.Join(errs...))
+	return nil, fmt.Errorf("loomnet: direct: %s。逐地址结果：%w", hint, err)
+}
+
+// dialPublic dials the peer's explicitly configured 公网直连 address（0.14
+// 第二方式）: a single "host:port" candidate, mTLS fingerprint pinned exactly
+// like LAN direct.
+func (n *Node) dialPublic(ctx context.Context, machineID, fp string, eps Endpoints) (*quicSession, error) {
+	if eps.Public == "" {
+		return nil, errors.New("loomnet: public: 对方未配置公网直连地址")
+	}
+	addr, err := resolveCandidate(eps.Public, 0)
+	if err != nil {
+		return nil, fmt.Errorf("loomnet: public: 对方通告的公网地址 %q 无法解析: %w", eps.Public, err)
+	}
+	s, rerr := n.raceCandidates(ctx, machineID, fp, []*net.UDPAddr{addr}, publicTimeout)
+	if rerr == nil {
+		return s, nil
+	}
+	return nil, fmt.Errorf(
+		"loomnet: public: 公网直连 %s 未拨通——请确认对方公网地址/端口正确、该 UDP 端口已在对方防火墙与云安全组放行、端口转发（如有）指向对方运行时。逐地址结果：%w",
+		eps.Public, rerr,
+	)
 }
 
 // drainSessions closes any sessions that finished their handshake after a winner
@@ -128,6 +168,24 @@ func candidateAddrs(eps Endpoints) []*net.UDPAddr {
 		add(lan)
 	}
 	return out
+}
+
+// ValidatePublicAdvertise checks a 公网直连 address: must be "host:port" with
+// a valid port (the host may be an IP or a domain). Shared by loomnet.New and
+// the settings endpoint so a bad config is rejected at BOTH doors.
+func ValidatePublicAdvertise(s string) error {
+	host, portStr, err := net.SplitHostPort(s)
+	if err != nil {
+		return fmt.Errorf("loomnet: 公网直连地址必须是 host:port（如 1.2.3.4:51820 或 example.com:51820）: %w", err)
+	}
+	if host == "" {
+		return errors.New("loomnet: 公网直连地址缺少主机名/IP")
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil || port < 1 || port > 65535 {
+		return fmt.Errorf("loomnet: 公网直连端口 %q 无效（1–65535）", portStr)
+	}
+	return nil
 }
 
 // resolveCandidate turns "ip", "ip:port", or "[v6]:port" into a UDP address,

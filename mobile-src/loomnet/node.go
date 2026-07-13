@@ -32,13 +32,16 @@ type Directory interface {
 
 // Endpoints are a machine's overlay dial candidates (§4.1). LAN entries are bare
 // IPs (paired with UDPPort) or "ip:port"; UDPPort is the overlay UDP socket
-// port. The overlay is LAN-direct only (2026-07 network-layer rebuild): there is
-// no public/reflexive endpoint, no hole punching, and no relay tier. Future
-// connection methods are added one at a time via the DialerRegistry — see
-// docs/network-connectivity-redesign.md.
+// port. Public is the machine's EXPLICITLY CONFIGURED 公网直连 address
+// ("host:port"; 0.14 第二连接方式) — never auto-derived: no reflexive
+// discovery, no hole punching, no relay. Only machines with a real public
+// address (cloud box / port-forward) set it, in 设置→网络与设备→公网直连.
+// Further methods are added one at a time via the DialerRegistry — see
+// docs/network-connectivity-redesign.md §8.
 type Endpoints struct {
 	LAN     []string `json:"lan"`
 	UDPPort int      `json:"udpPort"`
+	Public  string   `json:"public,omitempty"`
 }
 
 // Options configures a Node.
@@ -47,6 +50,12 @@ type Options struct {
 	MachineID    string       // this machine's stable overlay identity (cert CN)
 	Directory    Directory    // peer metadata + account trust set (required)
 	LocalHandler http.Handler // inbound overlay requests are served by this mux
+	// UDPPort fixes the overlay socket's bind port (0 = ephemeral). 公网直连
+	// requires a fixed port so port-forward/安全组 rules stay valid.
+	UDPPort int
+	// PublicAdvertise is this machine's 公网直连 address ("host:port") reported
+	// to peers via heartbeat; "" = 公网直连 off. Validated by New.
+	PublicAdvertise string
 }
 
 // Node is the process-local overlay endpoint: one shared QUIC/UDP socket that
@@ -89,6 +98,14 @@ func New(opts Options) (*Node, error) {
 	if opts.LocalHandler == nil {
 		opts.LocalHandler = http.NotFoundHandler()
 	}
+	if opts.PublicAdvertise != "" {
+		if err := ValidatePublicAdvertise(opts.PublicAdvertise); err != nil {
+			return nil, err
+		}
+	}
+	if opts.UDPPort < 0 || opts.UDPPort > 65535 {
+		return nil, fmt.Errorf("loomnet: UDPPort %d 超出范围（0–65535）", opts.UDPPort)
+	}
 	id, err := LoadOrCreateIdentity(opts.DataDir, opts.MachineID)
 	if err != nil {
 		return nil, err
@@ -118,7 +135,7 @@ func (n *Node) Start(ctx context.Context) error {
 	}
 	n.ctx, n.cancel = context.WithCancel(ctx)
 
-	tr, err := newTransport(n.ctx, n.identity, n.opts.Directory)
+	tr, err := newTransport(n.ctx, n.identity, n.opts.Directory, n.opts.UDPPort)
 	if err != nil {
 		n.cancel()
 		return err
@@ -139,11 +156,13 @@ func (n *Node) Start(ctx context.Context) error {
 	}
 	go func() { _ = n.httpSrv.Serve(ln) }()
 
-	// Register the built-in dial methods. The overlay currently ships exactly
-	// ONE method: LAN direct (priority 10). Future methods (hole punch, relay,
-	// …) are added one at a time via n.Registry.Register() once they meet the
-	// production bar — see docs/network-connectivity-redesign.md §8.
+	// Register the built-in dial methods in priority order: LAN direct (10)
+	// then 公网直连 (20; dials a peer's explicitly configured public address).
+	// Further methods (hole punch, relay, …) are added one at a time via
+	// n.Registry.Register() once they meet the production bar — see
+	// docs/network-connectivity-redesign.md §8.
 	n.Registry.Register(&directDialer{n: n})
+	n.Registry.Register(&publicDialer{n: n})
 
 	return nil
 }
@@ -192,7 +211,7 @@ func (n *Node) MachineID() string { return n.opts.MachineID }
 // LocalEndpoints reports this node's overlay dial candidates for the Hub
 // heartbeat (§6.2): local LAN IPs and the bound UDP port.
 func (n *Node) LocalEndpoints() Endpoints {
-	ep := Endpoints{LAN: localLANIPs()}
+	ep := Endpoints{LAN: localLANIPs(), Public: n.opts.PublicAdvertise}
 	if n.tr != nil {
 		ep.UDPPort = n.tr.localUDPAddr().Port
 	}
@@ -246,8 +265,8 @@ func (n *Node) PeerReachability(ctx context.Context, peerID string) []MethodStat
 }
 
 // SelfReachability describes the LOCAL node's own connection-method surface for
-// the topology UI's 本机 row. The overlay ships exactly one method — LAN
-// direct — marked Active when at least one live peer session is using it.
+// the topology UI's 本机 row: 局域网直连 always, 公网直连 as the second row
+// (configured or not — the unconfigured copy tells the user how to enable it).
 func (n *Node) SelfReachability() []MethodStatus {
 	eps := n.LocalEndpoints()
 	inUse := n.livePathCounts()
@@ -264,7 +283,19 @@ func (n *Node) SelfReachability() []MethodStatus {
 		direct.Detail = fmt.Sprintf("当前有 %d 条活跃连接经此方式通信。", inUse[pathDirect]) + " " + direct.Detail
 	}
 
-	return []MethodStatus{direct}
+	public := MethodStatus{Name: pathPublic, Label: "公网直连", Active: inUse[pathPublic] > 0}
+	switch {
+	case eps.Public != "":
+		public.Available = true
+		public.Detail = fmt.Sprintf("已配置公网直连地址 %s（本机实际监听 UDP 端口 %d）。任意网络的机器可经此直连本机——请确保该 UDP 端口已在系统防火墙与云安全组放行，且端口转发（如有）指向本机。", eps.Public, eps.UDPPort)
+	default:
+		public.Detail = "未配置。拥有公网 IP 或已做端口转发的机器（如云服务器）可在 设置→网络与设备→公网直连 开启：固定 UDP 端口并填写公网地址，跨网络的机器即可直连本机。"
+	}
+	if public.Active {
+		public.Detail = fmt.Sprintf("当前有 %d 条活跃连接经此方式通信。", inUse[pathPublic]) + " " + public.Detail
+	}
+
+	return []MethodStatus{direct, public}
 }
 
 // ctxKeyPeerID keys the verified peer machineID stashed by connContext.

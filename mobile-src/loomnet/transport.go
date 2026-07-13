@@ -32,10 +32,12 @@ type transport struct {
 	quicConf  *quic.Config
 }
 
-func newTransport(acceptCtx context.Context, id *Identity, dir Directory) (*transport, error) {
-	udp, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+func newTransport(acceptCtx context.Context, id *Identity, dir Directory, udpPort int) (*transport, error) {
+	// udpPort 0 = ephemeral (LAN-only machines re-advertise each heartbeat);
+	// a fixed port is required for 公网直连 so port-forward/安全组 rules hold.
+	udp, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: udpPort})
 	if err != nil {
-		return nil, fmt.Errorf("loomnet: bind overlay udp socket: %w", err)
+		return nil, fmt.Errorf("loomnet: bind overlay udp socket (port %d): %w", udpPort, err)
 	}
 	return &transport{
 		acceptCtx: acceptCtx,

@@ -161,6 +161,8 @@ func activePathDetail(name string) string {
 	switch name {
 	case pathDirect:
 		return "正在使用：局域网内 QUIC 直连（mTLS 指纹双向校验），不经过任何服务器。"
+	case pathPublic:
+		return "正在使用：经对方公网地址的 QUIC 直连（mTLS 指纹双向校验），不经过任何服务器。"
 	default:
 		return "正在使用此连接方式。"
 	}
@@ -215,6 +217,41 @@ func (d *directDialer) Dial(ctx context.Context, peerID string) (Session, error)
 		return nil, fmt.Errorf("loomnet: no directory entry for %s", peerID)
 	}
 	return d.n.dialDirect(ctx, peerID, fp, eps)
+}
+
+// publicDialer is the 公网直连 method (0.14 第二方式): dials the peer's
+// EXPLICITLY CONFIGURED public "host:port". Same QUIC/mTLS transport as LAN
+// direct — only the address source differs. Priority 20: the LAN path is
+// always tried first (cheaper, lower RTT); the ladder falls through here when
+// the peers aren't on the same LAN.
+type publicDialer struct{ n *Node }
+
+func (d *publicDialer) Name() string  { return pathPublic }
+func (d *publicDialer) Label() string { return "公网直连" }
+func (d *publicDialer) Priority() int { return 20 }
+
+func (d *publicDialer) Available(ctx context.Context, peerID string) bool {
+	ok, _ := d.Explain(ctx, peerID)
+	return ok
+}
+
+func (d *publicDialer) Explain(_ context.Context, peerID string) (bool, string) {
+	_, eps, ok := d.n.opts.Directory.PeerInfo(peerID)
+	if !ok {
+		return false, "尚未从 Hub 获取到对方的 overlay 连接信息。对方需在线并运行 0.13.7 及以上版本；本机每 60 秒自动刷新一次对方信息。"
+	}
+	if eps.Public == "" {
+		return false, "对方未配置公网直连地址。拥有公网 IP 或已做端口转发的机器（如云服务器）可在对方的 设置→网络与设备→公网直连 开启（固定 UDP 端口 + 公网地址），任意网络的机器即可直连它。"
+	}
+	return true, fmt.Sprintf("对方通告了公网直连地址 %s，可从任意网络发起 QUIC/UDP 直连（mTLS 指纹校验）。", eps.Public)
+}
+
+func (d *publicDialer) Dial(ctx context.Context, peerID string) (Session, error) {
+	fp, eps, ok := d.n.opts.Directory.PeerInfo(peerID)
+	if !ok {
+		return nil, fmt.Errorf("loomnet: no directory entry for %s", peerID)
+	}
+	return d.n.dialPublic(ctx, peerID, fp, eps)
 }
 
 // localLANNets enumerates this host's non-loopback, non-link-local unicast
