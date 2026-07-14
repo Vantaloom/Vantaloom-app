@@ -46,6 +46,16 @@ android {
         jvmTarget = "21"
     }
 
+    androidResources {
+        // AAPT's DEFAULT ignore pattern contains `<dir>_*` — it SILENTLY drops
+        // asset directories whose name starts with "_", which is exactly the
+        // Next.js export's `_next/` (the entire JS/CSS bundle). Build136 shipped
+        // 40 asset entries instead of thousands and the app froze forever on the
+        // prerendered spinner. This is the default pattern minus that one rule;
+        // the CI workflow additionally asserts assets/_next/ made it into the APK.
+        ignoreAssetsPattern = "!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~"
+    }
+
     // The compiled Next.js web export is copied into src/main/assets/ by CI (see
     // build-apk.yml) and served from a vantaloom.localhost origin by
     // WebViewAssetLoader. It is gitignored (42MB, lives in the repo's web/).

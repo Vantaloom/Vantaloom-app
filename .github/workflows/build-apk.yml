@@ -101,7 +101,24 @@ jobs:
           set -euo pipefail
           gradle :app:assembleRelease --no-daemon --stacktrace \
             -PversionCode="${GITHUB_RUN_NUMBER}" \
-            -PversionName="0.13.5-build${GITHUB_RUN_NUMBER}"
+            -PversionName="0.14.6-build${GITHUB_RUN_NUMBER}"
+
+      - name: Assert the web bundle survived AAPT (assets/_next present)
+        run: |
+          set -euo pipefail
+          # AAPT's default ignore pattern drops `_*` asset DIRECTORIES — with it,
+          # index.html ships but every /_next/ chunk 404s and the app freezes on
+          # the prerendered spinner (build136 regression). build.gradle.kts
+          # overrides ignoreAssetsPattern; this step makes any regression fail
+          # the build loudly instead of shipping a bricked APK.
+          APK="android/app/build/outputs/apk/release/app-release-unsigned.apk"
+          NEXT_COUNT="$(unzip -l "$APK" | grep -c 'assets/_next/' || true)"
+          TOTAL_ASSETS="$(unzip -l "$APK" | grep -c 'assets/' || true)"
+          echo "assets entries: $TOTAL_ASSETS, assets/_next entries: $NEXT_COUNT"
+          if [ "$NEXT_COUNT" -lt 10 ]; then
+            echo "ERROR: assets/_next/ missing or nearly empty ($NEXT_COUNT entries) — the web JS bundle did not make it into the APK."
+            exit 1
+          fi
 
       - name: Sign release APK (keystore from GitHub secrets)
         env:

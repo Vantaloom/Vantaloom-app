@@ -1,10 +1,17 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <!-- Framework Material theme (no AppCompat/Material dependency needed). The
-         activity hosts a full-bleed WebView, so no action bar. -->
+         activity hosts a full-bleed WebView, so no action bar.
+
+         These colors only paint the LAUNCH window (cold-start preview) — as soon
+         as MainActivity runs it goes edge-to-edge with transparent bars and the
+         web theme drives the real colors via __loomBridge.setChrome. White nav
+         bar here kills the black-strip flash on full-screen phones; light nav
+         icons for it live in values-v27 (attribute needs API 27). -->
     <style name="Theme.Vantaloom" parent="@android:style/Theme.Material.Light.NoActionBar">
         <item name="android:windowBackground">@android:color/white</item>
         <item name="android:statusBarColor">@android:color/white</item>
         <item name="android:windowLightStatusBar">true</item>
+        <item name="android:navigationBarColor">@android:color/white</item>
     </style>
 </resources>
