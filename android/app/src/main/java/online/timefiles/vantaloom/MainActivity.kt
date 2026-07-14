@@ -12,6 +12,7 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.FrameLayout
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
@@ -30,15 +31,19 @@ import androidx.webkit.WebViewFeature
  * *.localhost origins (isAllowedLocalOrigin), so the page MUST be served from a
  * *.localhost host — exactly as the retired Tauri shell used http://tauri.localhost.
  *
- * Display: edge-to-edge. The WebView is laid out full-bleed; the safe areas
- * (status bar / gesture-nav bar / display cutout / IME) are yielded back as
- * WebView padding from the insets listener, and the exposed strips take the
- * WebView's background color — which the web pushes via __loomBridge.setChrome
- * so they always match the page theme (the old fixed theme left a BLACK
- * navigation-bar strip on full-screen phones).
+ * Display: edge-to-edge. The window is full-bleed; the safe areas (status bar /
+ * gesture-nav bar / display cutout / IME) are yielded back as PADDING ON A ROOT
+ * FrameLayout that wraps the WebView — NOT on the WebView itself: WebView does
+ * not reliably honor setPadding (0.14.6 padded the WebView and real devices
+ * still rendered the page under the status bar, leaving the top bar covered
+ * and unclickable). The exposed strips take the root's background color —
+ * which the web pushes via __loomBridge.setChrome so they always match the
+ * page theme (the old fixed theme left a BLACK navigation-bar strip on
+ * full-screen phones).
  */
 class MainActivity : Activity() {
 
+    private lateinit var root: FrameLayout
     private lateinit var webView: WebView
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -63,19 +68,30 @@ class MainActivity : Activity() {
             .build()
 
         webView = WebView(this)
-        setContentView(webView)
+        root = FrameLayout(this)
+        root.addView(
+            webView,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT,
+            ),
+        )
+        setContentView(root)
         WebView.setWebContentsDebuggingEnabled(true)
 
         // Initial chrome: match the launch theme (light) until the web reports its
         // real theme through setChrome.
         applyChrome("#ffffff", dark = false)
 
-        // Safe areas → WebView padding. The page viewport = safe area, so no web
-        // layout ever hides under the bars; the padded strips show the WebView
-        // background (kept theme-colored by applyChrome). IME included: with
+        // Safe areas → ROOT padding (the WebView shrinks inside it). The page
+        // viewport = safe area, so no web layout ever hides under the bars —
+        // padding the WebView itself does NOT work (WebView ignores padding on
+        // real devices; the 0.14.6 build left the top bar under the status bar,
+        // unclickable). The padded strips show the root background (kept
+        // theme-colored by applyChrome). IME included: with
         // decorFitsSystemWindows(false) the window no longer auto-resizes for the
         // keyboard, so the bottom inset takes the larger of nav bar vs keyboard.
-        ViewCompat.setOnApplyWindowInsetsListener(webView) { v, insets ->
+        ViewCompat.setOnApplyWindowInsetsListener(root) { v, insets ->
             val bars = insets.getInsets(
                 WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
             )
@@ -145,6 +161,10 @@ class MainActivity : Activity() {
         val color = parseCssColor(cssColor) ?: fallback
         runOnUiThread {
             if (!::webView.isInitialized) return@runOnUiThread
+            // The ROOT paints the safe-area strips (it carries the insets
+            // padding); the WebView + window get the same color so there is no
+            // flash of mismatch during load/resize.
+            if (::root.isInitialized) root.setBackgroundColor(color)
             webView.setBackgroundColor(color)
             window.setBackgroundDrawable(ColorDrawable(color))
             val controller = WindowCompat.getInsetsController(window, webView)
