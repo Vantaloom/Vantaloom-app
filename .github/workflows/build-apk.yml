@@ -101,7 +101,7 @@ jobs:
           set -euo pipefail
           gradle :app:assembleRelease --no-daemon --stacktrace \
             -PversionCode="${GITHUB_RUN_NUMBER}" \
-            -PversionName="0.14.9-build${GITHUB_RUN_NUMBER}"
+            -PversionName="0.14.10-build${GITHUB_RUN_NUMBER}"
 
       - name: Assert the web bundle survived AAPT (assets/_next present)
         run: |
