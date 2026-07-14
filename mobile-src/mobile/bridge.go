@@ -27,6 +27,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -197,17 +198,23 @@ func (b *Bridge) Disconnect() error {
 	return nil
 }
 
-// StatusJSON reports the connection state as {"state","path","error"} — path is
-// present only when connected, error only in the error state.
+// StatusJSON reports the connection state as {"state","path","error","lanIp"} —
+// path is present only when connected, error only in the error state. lanIp is
+// this DEVICE's own private LAN IPv4 (when determinable): the web layer's
+// 局域网直连 tab matches peers by private subnet, and the phone cannot learn
+// its own LAN IP any other way (Android denies netlink enumeration; the web
+// has no network APIs at all).
 func (b *Bridge) StatusJSON() string {
 	b.mu.Lock()
 	state, path, errMsg := b.state, b.path, b.err
+	node := b.node
 	b.mu.Unlock()
 
 	out := struct {
 		State string `json:"state"`
 		Path  string `json:"path,omitempty"`
 		Error string `json:"error,omitempty"`
+		LanIP string `json:"lanIp,omitempty"`
 	}{State: state}
 	if state == "connected" {
 		out.Path = path
@@ -215,11 +222,30 @@ func (b *Bridge) StatusJSON() string {
 	if state == "error" {
 		out.Error = errMsg
 	}
+	if node != nil {
+		for _, ip := range node.LocalEndpoints().LAN {
+			if isPrivateV4(ip) {
+				out.LanIP = ip
+				break
+			}
+		}
+	}
 	data, err := json.Marshal(out)
 	if err != nil {
 		return `{"state":"error","error":"status marshal failed"}`
 	}
 	return string(data)
+}
+
+// isPrivateV4 reports whether ip is an RFC1918 IPv4 literal — the only kind of
+// address the LAN tab's same-subnet matching can use.
+func isPrivateV4(ip string) bool {
+	parsed := net.ParseIP(ip)
+	if parsed == nil {
+		return false
+	}
+	v4 := parsed.To4()
+	return v4 != nil && v4.IsPrivate()
 }
 
 // SetToken rotates the Hub JWT used by the mini Hub client for REST auth and

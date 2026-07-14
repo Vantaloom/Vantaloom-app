@@ -52,6 +52,12 @@ func (s *quicSession) AcceptStream() (net.Conn, error) {
 
 func (s *quicSession) RemoteMachineID() string { return s.remoteID }
 
+// RemoteAddr is the peer's UDP address on this connection — used by the
+// topology to classify HOW an adopted-inbound connection reached us (private
+// source = 局域网, else 公网). Optional-interface style: callers type-assert
+// `interface{ RemoteAddr() net.Addr }`.
+func (s *quicSession) RemoteAddr() net.Addr { return s.conn.RemoteAddr() }
+
 func (s *quicSession) Close() error {
 	return s.conn.CloseWithError(quic.ApplicationErrorCode(0), "closed")
 }

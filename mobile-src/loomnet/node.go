@@ -321,8 +321,8 @@ func (n *Node) LocalEndpoints() Endpoints {
 }
 
 // LastPath reports the method that last established a connection to machineID
-// (currently only "direct"), or "" if none. It is a memory: it survives the
-// session dying. For "what is in use RIGHT NOW" use ActivePath.
+// ("direct"/"public"/"reverse"/"inbound"), or "" if none. It is a memory: it
+// survives the session dying. For "what is in use RIGHT NOW" use ActivePath.
 func (n *Node) LastPath(machineID string) string {
 	n.pathsMu.Lock()
 	defer n.pathsMu.Unlock()
@@ -339,8 +339,55 @@ func (n *Node) ActivePath(machineID string) string {
 	return n.LastPath(machineID)
 }
 
+// ActiveInboundVia classifies how the LIVE adopted-inbound connection from
+// machineID reached us: "lan" (private / ULA / loopback source address) or
+// "public". "" when there is no live inbound session. This lets the topology
+// label an inbound row with its actual transport（入站连接复用 · 局域网/公网）
+// so both ends of the same wire describe it consistently — the dialer side
+// already shows 局域网直连/公网直连.
+func (n *Node) ActiveInboundVia(machineID string) string {
+	if n.ActivePath(machineID) != pathInbound {
+		return ""
+	}
+	s := n.cachedConn(machineID)
+	ra, ok := s.(interface{ RemoteAddr() net.Addr })
+	if !ok {
+		return ""
+	}
+	return classifyRemoteAddr(ra.RemoteAddr())
+}
+
+// classifyRemoteAddr maps a peer source address to "lan" / "public" ("" when
+// unparseable). Private (RFC1918 + ULA), link-local, and loopback all count as
+// LAN — they can only have arrived over the local network.
+func classifyRemoteAddr(addr net.Addr) string {
+	if addr == nil {
+		return ""
+	}
+	var ip net.IP
+	switch a := addr.(type) {
+	case *net.UDPAddr:
+		ip = a.IP
+	case *net.TCPAddr:
+		ip = a.IP
+	default:
+		host, _, err := net.SplitHostPort(addr.String())
+		if err != nil {
+			return ""
+		}
+		ip = net.ParseIP(host)
+	}
+	if ip == nil {
+		return ""
+	}
+	if ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLoopback() {
+		return "lan"
+	}
+	return "public"
+}
+
 // livePathCounts tallies how many live peer sessions currently use each path
-// kind (currently only "direct").
+// kind ("direct"/"public"/"reverse"/"inbound").
 func (n *Node) livePathCounts() map[string]int {
 	counts := map[string]int{}
 	n.connsMu.Lock()
@@ -410,7 +457,32 @@ func (n *Node) SelfReachability() []MethodStatus {
 		public.Detail = fmt.Sprintf("当前有 %d 条活跃连接经此方式通信。", inUse[pathPublic]) + " " + public.Detail
 	}
 
-	return []MethodStatus{direct, public}
+	out := []MethodStatus{direct, public}
+
+	// 入站连接复用：对端拨入本机、被本机双向复用的活连接。它经由局域网/公网
+	// 线路而来但 path 记账是 pathInbound，不计入上面两枚芯片的 Active——若不
+	// 单独显示，本机明明承载着活跃通信、自机行却两枚全绿（无一“正在使用”），
+	// 与对端视角的蓝色活跃芯片互相矛盾（2026-07-14 用户实测困惑点）。
+	if n := inUse[pathInbound]; n > 0 {
+		out = append(out, MethodStatus{
+			Name:      pathInbound,
+			Label:     "入站连接复用",
+			Available: true,
+			Active:    true,
+			Detail:    fmt.Sprintf("当前有 %d 条由对方拨入本机的连接正被双向复用：对方→本机方向建立，本机→对方的请求经同一连接送达（QUIC 天然双向）。", n),
+		})
+	}
+	if n := inUse[pathReverse]; n > 0 {
+		out = append(out, MethodStatus{
+			Name:      pathReverse,
+			Label:     "反向公网直连",
+			Available: true,
+			Active:    true,
+			Detail:    fmt.Sprintf("当前有 %d 条经反向公网直连建立的活跃连接（本机经 Hub 信令请对方拨入本机公网地址后双向复用）。", n),
+		})
+	}
+
+	return out
 }
 
 // ctxKeyPeerID keys the verified peer machineID stashed by connContext.
@@ -442,23 +514,58 @@ func (n *Node) serveHandler() http.Handler {
 }
 
 // localLANIPs enumerates this host's non-loopback, non-link-local unicast IPs
-// for the LAN candidate list.
+// for the LAN candidate list. When interface enumeration yields nothing —
+// Android 11+ denies apps the netlink RTM_GETLINK query behind
+// net.InterfaceAddrs (golang/go#40569), so in the phone shell it ALWAYS comes
+// back empty — fall back to UDP "dials": the OS picks the preferred outbound
+// interface and reveals its source address without netlink and without sending
+// a single packet. Without this the phone's heartbeat never carried a localIp
+// and its Hub row sat on the registration placeholder forever (2026-07-15
+// 实锤：手机行 local_ip 恒 127.0.0.1，「局域网直连」tab 因此永远匹配不到).
 func localLANIPs() []string {
-	addrs, err := net.InterfaceAddrs()
-	if err != nil {
-		return nil
-	}
 	var out []string
-	for _, a := range addrs {
-		ipnet, ok := a.(*net.IPNet)
-		if !ok || ipnet.IP.IsLoopback() || ipnet.IP.IsLinkLocalUnicast() {
-			continue
+	if addrs, err := net.InterfaceAddrs(); err == nil {
+		for _, a := range addrs {
+			ipnet, ok := a.(*net.IPNet)
+			if !ok || ipnet.IP.IsLoopback() || ipnet.IP.IsLinkLocalUnicast() {
+				continue
+			}
+			if v4 := ipnet.IP.To4(); v4 != nil {
+				out = append(out, v4.String())
+			} else if ipnet.IP.To16() != nil {
+				out = append(out, ipnet.IP.String())
+			}
 		}
-		if v4 := ipnet.IP.To4(); v4 != nil {
-			out = append(out, v4.String())
-		} else if ipnet.IP.To16() != nil {
-			out = append(out, ipnet.IP.String())
+	}
+	if len(out) > 0 {
+		return out
+	}
+	for _, probe := range []struct{ network, addr string }{
+		{"udp4", "8.8.8.8:80"},
+		{"udp6", "[2001:4860:4860::8888]:80"},
+	} {
+		if ip := outboundLocalIP(probe.network, probe.addr); ip != "" {
+			out = append(out, ip)
 		}
 	}
 	return out
+}
+
+// outboundLocalIP reports the local source IP the OS would use to reach addr,
+// via a connectionless UDP "dial" (no packets are sent, no netlink is needed).
+// Returns "" when the family is unavailable or the source is loopback/link-local.
+func outboundLocalIP(network, addr string) string {
+	conn, err := net.Dial(network, addr)
+	if err != nil {
+		return ""
+	}
+	defer conn.Close()
+	ua, ok := conn.LocalAddr().(*net.UDPAddr)
+	if !ok || ua.IP == nil || ua.IP.IsLoopback() || ua.IP.IsLinkLocalUnicast() {
+		return ""
+	}
+	if v4 := ua.IP.To4(); v4 != nil {
+		return v4.String()
+	}
+	return ua.IP.String()
 }
