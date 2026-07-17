@@ -137,6 +137,24 @@ class LoomJsBridge(
         onPickImages(callId, source)
     }
 
+    /**
+     * 手机本地运行时（0.14.29）：启动/复用打包在 APK 里的完整 vantaloom-api
+     * 子进程，resolve {"baseUrl":"http://127.0.0.1:<port>"}。前台服务保活与
+     * 组网节点同一个（dataSync）。幂等——已在跑直接返回。
+     */
+    @JavascriptInterface
+    fun startLocalRuntime(callId: String) {
+        worker.execute {
+            try {
+                LoomForegroundService.start(context)
+                val port = LocalRuntime.ensureStarted(context)
+                resolve(callId, JSONObject().put("baseUrl", "http://127.0.0.1:$port").toString())
+            } catch (e: Throwable) {
+                reject(callId, e.message ?: "本地运行时启动失败")
+            }
+        }
+    }
+
     /** Shell-side promise fulfilment (MainActivity 的选择流程用)。 */
     internal fun resolveFromShell(callId: String, payloadJson: String) = resolve(callId, payloadJson)
 

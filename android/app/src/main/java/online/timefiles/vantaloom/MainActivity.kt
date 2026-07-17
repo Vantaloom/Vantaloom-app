@@ -362,7 +362,8 @@ class MainActivity : Activity() {
     stop: function (callbackId) { N.stopNode(callbackId); },
     pickImages: function (source, callbackId) {
       N.pickImages(callbackId, String(source || "gallery"));
-    }
+    },
+    startLocalRuntime: function (callbackId) { N.startLocalRuntime(callbackId); }
   };
 })();
 """

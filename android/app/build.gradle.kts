@@ -56,6 +56,17 @@ android {
         ignoreAssetsPattern = "!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~"
     }
 
+    packaging {
+        jniLibs {
+            // 本地运行时（0.14.29）：jniLibs 里的 libvantaloom.so 是完整的
+            // vantaloom-api（纯 Go 可执行文件伪装成 .so），必须解压到
+            // nativeLibraryDir 才能被 ProcessBuilder exec（Android 10+ 禁止从
+            // 可写目录执行）。useLegacyPackaging=true 关闭「从 APK 内直接
+            // mmap」优化、强制解压——这是 exec 型 .so 的标准打法。
+            useLegacyPackaging = true
+        }
+    }
+
     // The compiled Next.js web export is copied into src/main/assets/ by CI (see
     // build-apk.yml) and served from a vantaloom.localhost origin by
     // WebViewAssetLoader. It is gitignored (42MB, lives in the repo's web/).
