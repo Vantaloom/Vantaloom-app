@@ -1,8 +1,16 @@
 package online.timefiles.vantaloom
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Matrix
+import android.media.ExifInterface
+import android.net.Uri
+import android.util.Base64
 import android.webkit.JavascriptInterface
+import org.json.JSONArray
 import org.json.JSONObject
+import java.io.ByteArrayOutputStream
 import java.util.concurrent.Executors
 
 /**
@@ -32,6 +40,8 @@ class LoomJsBridge(
     private val evalJs: (String) -> Unit,
     /** 系统栏配色回调（web 主题 → MainActivity.applyChrome）。 */
     private val onChrome: (color: String, dark: Boolean) -> Unit = { _, _ -> },
+    /** 图片选择回调（composer 加号 → MainActivity 拉起相机/相册）。 */
+    private val onPickImages: (callId: String, source: String) -> Unit = { _, _ -> },
 ) {
     private val worker = Executors.newSingleThreadExecutor()
 
@@ -117,6 +127,94 @@ class LoomJsBridge(
         }
     }
 
+    /**
+     * 图片选择（0.14.28 composer 加号键）：source = "camera" | "gallery"。壳侧
+     * （MainActivity）拉起相机/Photo Picker，结果经 encodeImagesAsync 编码后
+     * resolve {"images":[{dataUrl,name}]}；用户取消 = 空数组（不是错误）。
+     */
+    @JavascriptInterface
+    fun pickImages(callId: String, source: String) {
+        onPickImages(callId, source)
+    }
+
+    /** Shell-side promise fulfilment (MainActivity 的选择流程用)。 */
+    internal fun resolveFromShell(callId: String, payloadJson: String) = resolve(callId, payloadJson)
+
+    internal fun rejectFromShell(callId: String, message: String) = reject(callId, message)
+
+    /**
+     * Decode + downscale (long edge ≤ [pickMaxEdge], EXIF 转正) + JPEG q85 +
+     * base64 on the worker thread, then resolve callId with
+     * {"images":[{dataUrl,name}]}. Undecodable entries are skipped; onDone runs
+     * regardless (camera temp-file cleanup).
+     */
+    internal fun encodeImagesAsync(callId: String, uris: List<Uri>, onDone: () -> Unit = {}) {
+        worker.execute {
+            try {
+                val arr = JSONArray()
+                for (uri in uris.take(pickMaxImages)) {
+                    val encoded = encodeImage(uri) ?: continue
+                    arr.put(encoded)
+                }
+                resolve(callId, JSONObject().put("images", arr).toString())
+            } catch (e: Throwable) {
+                reject(callId, e.message ?: "图片处理失败")
+            } finally {
+                onDone()
+            }
+        }
+    }
+
+    private fun encodeImage(uri: Uri): JSONObject? {
+        val resolver = context.contentResolver
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        // 注意：bounds pass 的 decodeStream 返回值恒为 null（inJustDecodeBounds
+        // 语义），elvis 必须只兜流打不开，不能兜解码返回值。
+        val boundsStream = resolver.openInputStream(uri) ?: return null
+        boundsStream.use { BitmapFactory.decodeStream(it, null, bounds) }
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+        var sample = 1
+        while (bounds.outWidth / sample > pickMaxEdge || bounds.outHeight / sample > pickMaxEdge) {
+            sample *= 2
+        }
+        val opts = BitmapFactory.Options().apply { inSampleSize = sample }
+        var bitmap = resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, opts) }
+            ?: return null
+        // 相机竖拍靠 EXIF 标方向——不转正会横躺进对话。
+        val rotation = readExifRotation(uri)
+        if (rotation != 0f) {
+            val matrix = Matrix().apply { postRotate(rotation) }
+            val rotated = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+            if (rotated !== bitmap) bitmap.recycle()
+            bitmap = rotated
+        }
+        val out = ByteArrayOutputStream()
+        bitmap.compress(Bitmap.CompressFormat.JPEG, 85, out)
+        bitmap.recycle()
+        val b64 = Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
+        return JSONObject()
+            .put("dataUrl", "data:image/jpeg;base64,$b64")
+            .put("name", "photo-${System.currentTimeMillis()}.jpg")
+    }
+
+    private fun readExifRotation(uri: Uri): Float = try {
+        context.contentResolver.openInputStream(uri)?.use { stream ->
+            when (
+                ExifInterface(stream).getAttributeInt(
+                    ExifInterface.TAG_ORIENTATION,
+                    ExifInterface.ORIENTATION_NORMAL,
+                )
+            ) {
+                ExifInterface.ORIENTATION_ROTATE_90 -> 90f
+                ExifInterface.ORIENTATION_ROTATE_180 -> 180f
+                ExifInterface.ORIENTATION_ROTATE_270 -> 270f
+                else -> 0f
+            }
+        } ?: 0f
+    } catch (_: Throwable) {
+        0f
+    }
+
     /** Tear the node down and stop the foreground service. */
     @JavascriptInterface
     fun stopNode(callId: String) {
@@ -148,4 +246,12 @@ class LoomJsBridge(
     // JSONObject.quote yields a properly escaped JSON string literal, which is also
     // a valid JS string literal.
     private fun quote(s: String): String = JSONObject.quote(s)
+
+    companion object {
+        /** 单次最多带回的图片数（Photo Picker 的 EXTRA_PICK_IMAGES_MAX 同值）。 */
+        const val pickMaxImages = 6
+
+        /** 长边像素上限——超过按 2 的幂降采样（与桌面端 read 读图口径一致）。 */
+        private const val pickMaxEdge = 2048
+    }
 }

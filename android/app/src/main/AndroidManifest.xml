@@ -9,6 +9,15 @@
     <!-- Notifications: required to show the foreground-service notification on API 33+. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!-- 拍照走 ACTION_IMAGE_CAPTURE intent（刻意不声明 CAMERA 权限——不声明则
+         intent 无需权限；一旦声明反而必须先请求授权）。Android 11+ 包可见性:
+         需要 queries 才能解析系统相机。 -->
+    <queries>
+        <intent>
+            <action android:name="android.media.action.IMAGE_CAPTURE" />
+        </intent>
+    </queries>
+
     <application
         android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
@@ -37,6 +46,17 @@
             android:enabled="true"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+
+        <!-- 相机拍照的输出文件经 FileProvider 暴露给相机应用（cache/camera/）。 -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
 
     </application>
 

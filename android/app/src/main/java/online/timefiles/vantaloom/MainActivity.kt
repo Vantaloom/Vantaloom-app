@@ -3,22 +3,27 @@ package online.timefiles.vantaloom
 import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.drawable.ColorDrawable
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.MediaStore
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
+import androidx.core.content.FileProvider
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.webkit.WebViewAssetLoader
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
+import java.io.File
 
 /**
  * Single-Activity WebView shell. It serves the compiled Next.js export from
@@ -45,6 +50,14 @@ class MainActivity : Activity() {
 
     private lateinit var root: FrameLayout
     private lateinit var webView: WebView
+    private lateinit var bridge: LoomJsBridge
+
+    // In-flight image pick (composer 加号键). One at a time; the classic
+    // startActivityForResult flow is used because this Activity is a bare
+    // android.app.Activity (no androidx.activity Result API available).
+    private var pendingPickCallId: String? = null
+    private var pendingCameraUri: Uri? = null
+    private var pendingCameraFile: File? = null
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -128,14 +141,15 @@ class MainActivity : Activity() {
 
         // Native bridge: primitive-only methods the JS shim adapts (contract v2 —
         // see loom-bridge.ts; the TS side owns the promise registry).
-        webView.addJavascriptInterface(
-            LoomJsBridge(
-                applicationContext,
-                evalJs = { js -> webView.post { webView.evaluateJavascript(js, null) } },
-                onChrome = { color, dark -> applyChrome(color, dark) },
-            ),
-            "__loomNative",
+        bridge = LoomJsBridge(
+            applicationContext,
+            evalJs = { js -> webView.post { webView.evaluateJavascript(js, null) } },
+            onChrome = { color, dark -> applyChrome(color, dark) },
+            onPickImages = { callId, source ->
+                runOnUiThread { launchImagePick(callId, source) }
+            },
         )
+        webView.addJavascriptInterface(bridge, "__loomNative")
 
         // Guaranteed-early injection so window.__loomBridge exists before any page
         // script runs (preferred over onPageStarted).
@@ -173,6 +187,89 @@ class MainActivity : Activity() {
         }
     }
 
+    /**
+     * 拉起图片选择（composer 加号键）。source="camera" → ACTION_IMAGE_CAPTURE
+     * 写 FileProvider 缓存文件（未声明 CAMERA 权限——相机 intent 无需权限，一旦
+     * 声明反而必须先授权）；其余 → Android 13+ 系统 Photo Picker（应用内底部
+     * 弹层、免存储权限），旧系统回退 ACTION_GET_CONTENT。
+     */
+    private fun launchImagePick(callId: String, source: String) {
+        if (pendingPickCallId != null) {
+            bridge.rejectFromShell(callId, "已有图片选择进行中")
+            return
+        }
+        pendingPickCallId = callId
+        try {
+            if (source == "camera") {
+                val dir = File(cacheDir, "camera").apply { mkdirs() }
+                val file = File(dir, "capture-${System.currentTimeMillis()}.jpg")
+                val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
+                pendingCameraFile = file
+                pendingCameraUri = uri
+                val intent = Intent(MediaStore.ACTION_IMAGE_CAPTURE)
+                    .putExtra(MediaStore.EXTRA_OUTPUT, uri)
+                    .addFlags(
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                            Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                    )
+                @Suppress("DEPRECATION")
+                startActivityForResult(intent, REQ_PICK_CAMERA)
+            } else {
+                val intent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    Intent(MediaStore.ACTION_PICK_IMAGES)
+                        .putExtra(MediaStore.EXTRA_PICK_IMAGES_MAX, LoomJsBridge.pickMaxImages)
+                } else {
+                    Intent(Intent.ACTION_GET_CONTENT)
+                        .setType("image/*")
+                        .putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+                        .addCategory(Intent.CATEGORY_OPENABLE)
+                }
+                @Suppress("DEPRECATION")
+                startActivityForResult(intent, REQ_PICK_GALLERY)
+            }
+        } catch (e: Throwable) {
+            pendingPickCallId = null
+            pendingCameraUri = null
+            pendingCameraFile?.delete()
+            pendingCameraFile = null
+            bridge.rejectFromShell(callId, e.message ?: "无法打开图片选择器")
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        if (requestCode != REQ_PICK_CAMERA && requestCode != REQ_PICK_GALLERY) {
+            super.onActivityResult(requestCode, resultCode, data)
+            return
+        }
+        val callId = pendingPickCallId ?: return
+        pendingPickCallId = null
+        val cameraUri = pendingCameraUri
+        val cameraFile = pendingCameraFile
+        pendingCameraUri = null
+        pendingCameraFile = null
+
+        if (resultCode != RESULT_OK) {
+            // 用户取消 = 空结果（正常路径,不是错误）。
+            cameraFile?.delete()
+            bridge.resolveFromShell(callId, """{"images":[]}""")
+            return
+        }
+        val uris = mutableListOf<Uri>()
+        if (requestCode == REQ_PICK_CAMERA) {
+            if (cameraUri != null) uris.add(cameraUri)
+        } else {
+            val clip = data?.clipData
+            if (clip != null) {
+                for (i in 0 until clip.itemCount) uris.add(clip.getItemAt(i).uri)
+            } else {
+                data?.data?.let { uris.add(it) }
+            }
+        }
+        // 解码/降采样/base64 在桥 worker 线程做，完成后清相机临时文件。
+        bridge.encodeImagesAsync(callId, uris) { cameraFile?.delete() }
+    }
+
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
         webView.saveState(outState)
@@ -205,6 +302,8 @@ class MainActivity : Activity() {
     companion object {
         private const val LOOM_DOMAIN = "vantaloom.localhost"
         private const val REQ_NOTIF = 100
+        private const val REQ_PICK_CAMERA = 101
+        private const val REQ_PICK_GALLERY = 102
 
         /**
          * Parse a CSS color the web reports: "#rgb", "#rrggbb", "rgb(r, g, b)" or
@@ -260,7 +359,10 @@ class MainActivity : Activity() {
     },
     connect: function (machineId, callbackId) { N.connect(callbackId, machineId); },
     disconnect: function (callbackId) { N.disconnect(callbackId); },
-    stop: function (callbackId) { N.stopNode(callbackId); }
+    stop: function (callbackId) { N.stopNode(callbackId); },
+    pickImages: function (source, callbackId) {
+      N.pickImages(callbackId, String(source || "gallery"));
+    }
   };
 })();
 """
