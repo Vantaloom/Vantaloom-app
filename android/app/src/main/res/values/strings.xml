@@ -4,4 +4,5 @@
     <string name="loom_channel_name">Vantaloom 覆盖网络</string>
     <string name="loom_notification_title">Vantaloom 已连接</string>
     <string name="loom_notification_text">覆盖网络节点正在后台运行</string>
+    <string name="messages_channel_name">消息通知</string>
 </resources>

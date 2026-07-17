@@ -10,7 +10,9 @@ import android.graphics.drawable.ColorDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.provider.MediaStore
+import android.provider.Settings
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
@@ -148,6 +150,12 @@ class MainActivity : Activity() {
             onPickImages = { callId, source ->
                 runOnUiThread { launchImagePick(callId, source) }
             },
+            onPickFiles = { callId ->
+                runOnUiThread { launchFilePick(callId) }
+            },
+            onPickFolder = { callId ->
+                runOnUiThread { launchFolderPick(callId) }
+            },
         )
         webView.addJavascriptInterface(bridge, "__loomNative")
 
@@ -236,9 +244,93 @@ class MainActivity : Activity() {
         }
     }
 
+    /**
+     * 文件/文件夹选择的「所有文件访问」权限门（0.14.31）：未授权时拉系统授权页
+     * 并 resolve {"needPermission":true}（前端提示后用户授权完重试）。同 UID 的
+     * 运行时子进程共享该授权，draft 导入由运行时对真实路径原生复制。
+     */
+    private fun hasAllFilesAccess(): Boolean =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            Environment.isExternalStorageManager()
+        } else {
+            checkSelfPermission(Manifest.permission.READ_EXTERNAL_STORAGE) ==
+                PackageManager.PERMISSION_GRANTED
+        }
+
+    private fun launchAllFilesAccessRequest() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            try {
+                startActivity(
+                    Intent(
+                        Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                        Uri.parse("package:$packageName"),
+                    ),
+                )
+            } catch (_: Throwable) {
+                runCatching {
+                    startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
+                }
+            }
+        } else {
+            requestPermissions(
+                arrayOf(
+                    Manifest.permission.READ_EXTERNAL_STORAGE,
+                    Manifest.permission.WRITE_EXTERNAL_STORAGE,
+                ),
+                REQ_STORAGE_LEGACY,
+            )
+        }
+    }
+
+    private fun launchFilePick(callId: String) {
+        if (pendingPickCallId != null) {
+            bridge.rejectFromShell(callId, "已有选择进行中")
+            return
+        }
+        if (!hasAllFilesAccess()) {
+            launchAllFilesAccessRequest()
+            bridge.resolveFromShell(callId, """{"needPermission":true}""")
+            return
+        }
+        pendingPickCallId = callId
+        try {
+            val intent = Intent(Intent.ACTION_OPEN_DOCUMENT)
+                .setType("*/*")
+                .putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+                .addCategory(Intent.CATEGORY_OPENABLE)
+            @Suppress("DEPRECATION")
+            startActivityForResult(intent, REQ_PICK_FILES)
+        } catch (e: Throwable) {
+            pendingPickCallId = null
+            bridge.rejectFromShell(callId, e.message ?: "无法打开文件选择器")
+        }
+    }
+
+    private fun launchFolderPick(callId: String) {
+        if (pendingPickCallId != null) {
+            bridge.rejectFromShell(callId, "已有选择进行中")
+            return
+        }
+        if (!hasAllFilesAccess()) {
+            launchAllFilesAccessRequest()
+            bridge.resolveFromShell(callId, """{"needPermission":true}""")
+            return
+        }
+        pendingPickCallId = callId
+        try {
+            @Suppress("DEPRECATION")
+            startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT_TREE), REQ_PICK_FOLDER)
+        } catch (e: Throwable) {
+            pendingPickCallId = null
+            bridge.rejectFromShell(callId, e.message ?: "无法打开文件夹选择器")
+        }
+    }
+
     @Suppress("DEPRECATION")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        if (requestCode != REQ_PICK_CAMERA && requestCode != REQ_PICK_GALLERY) {
+        if (requestCode != REQ_PICK_CAMERA && requestCode != REQ_PICK_GALLERY &&
+            requestCode != REQ_PICK_FILES && requestCode != REQ_PICK_FOLDER
+        ) {
             super.onActivityResult(requestCode, resultCode, data)
             return
         }
@@ -248,6 +340,31 @@ class MainActivity : Activity() {
         val cameraFile = pendingCameraFile
         pendingCameraUri = null
         pendingCameraFile = null
+
+        if (requestCode == REQ_PICK_FILES) {
+            if (resultCode != RESULT_OK) {
+                bridge.resolveFromShell(callId, """{"files":[]}""")
+                return
+            }
+            val uris = mutableListOf<Uri>()
+            val clip = data?.clipData
+            if (clip != null) {
+                for (i in 0 until clip.itemCount) uris.add(clip.getItemAt(i).uri)
+            } else {
+                data?.data?.let { uris.add(it) }
+            }
+            bridge.materializeFilesAsync(callId, uris)
+            return
+        }
+        if (requestCode == REQ_PICK_FOLDER) {
+            val tree = data?.data
+            if (resultCode != RESULT_OK || tree == null) {
+                bridge.resolveFromShell(callId, """{"folder":null}""")
+                return
+            }
+            bridge.walkFolderAsync(callId, tree)
+            return
+        }
 
         if (resultCode != RESULT_OK) {
             // 用户取消 = 空结果（正常路径,不是错误）。
@@ -304,6 +421,9 @@ class MainActivity : Activity() {
         private const val REQ_NOTIF = 100
         private const val REQ_PICK_CAMERA = 101
         private const val REQ_PICK_GALLERY = 102
+        private const val REQ_PICK_FILES = 103
+        private const val REQ_PICK_FOLDER = 104
+        private const val REQ_STORAGE_LEGACY = 105
 
         /**
          * Parse a CSS color the web reports: "#rgb", "#rrggbb", "rgb(r, g, b)" or
@@ -362,6 +482,11 @@ class MainActivity : Activity() {
     stop: function (callbackId) { N.stopNode(callbackId); },
     pickImages: function (source, callbackId) {
       N.pickImages(callbackId, String(source || "gallery"));
+    },
+    pickFiles: function (callbackId) { N.pickFiles(callbackId); },
+    pickFolder: function (callbackId) { N.pickFolder(callbackId); },
+    shareFile: function (path, name, callbackId) {
+      N.shareFile(callbackId, String(path || ""), String(name || ""));
     },
     startLocalRuntime: function (callbackId) { N.startLocalRuntime(callbackId); }
   };

@@ -42,6 +42,10 @@ class LoomJsBridge(
     private val onChrome: (color: String, dark: Boolean) -> Unit = { _, _ -> },
     /** 图片选择回调（composer 加号 → MainActivity 拉起相机/相册）。 */
     private val onPickImages: (callId: String, source: String) -> Unit = { _, _ -> },
+    /** 文件选择回调（composer 加号「文件」→ MainActivity 拉起文档选择器）。 */
+    private val onPickFiles: (callId: String) -> Unit = { _ -> },
+    /** 文件夹选择回调（composer 加号「文件夹」→ MainActivity 拉起目录树选择器）。 */
+    private val onPickFolder: (callId: String) -> Unit = { _ -> },
 ) {
     private val worker = Executors.newSingleThreadExecutor()
 
@@ -138,6 +142,96 @@ class LoomJsBridge(
     }
 
     /**
+     * 文件选择（0.14.31 composer 加号「文件」）：先过「所有文件访问」权限门
+     * （MainActivity 未授权时拉系统设置页并 resolve {"needPermission":true}），
+     * 授权后 ACTION_OPEN_DOCUMENT 多选，结果 resolve
+     * {"files":[{path,name,size}]}（真实绝对路径，运行时子进程同 UID 可直读）；
+     * 用户取消 = 空数组。
+     */
+    @JavascriptInterface
+    fun pickFiles(callId: String) {
+        onPickFiles(callId)
+    }
+
+    /**
+     * 文件夹选择（0.14.31 composer 加号「文件夹」）：同一权限门，授权后
+     * ACTION_OPEN_DOCUMENT_TREE，壳侧 walk 统计后 resolve
+     * {"folder":{path,name,fileCount,totalBytes,capped}}；取消 = {"folder":null}。
+     * 复制动作不在壳里做——由运行时 draft-import 端点原生执行。
+     */
+    @JavascriptInterface
+    fun pickFolder(callId: String) {
+        onPickFolder(callId)
+    }
+
+    /**
+     * 分享文件（0.14.31 交付内容长按「分享」）：path 为本机真实路径（本地运行
+     * 时同设备零拷贝快路径）或 http(s) raw URL（控制端连远程运行时 / 跨机——
+     * 壳先下载到分享缓存）。落到 cache/share 后经 FileProvider + ACTION_SEND
+     * 系统分享面板发给其他应用（QQ/微信等）。全程在 worker；resolve {"ok":true}。
+     */
+    @JavascriptInterface
+    fun shareFile(callId: String, path: String, name: String) {
+        worker.execute {
+            try {
+                val dir = java.io.File(context.cacheDir, "share").apply { mkdirs() }
+                val fallbackName = path.substringAfterLast('/').substringBefore('?')
+                val safeName = (name.ifBlank { fallbackName }.ifBlank { "文件" })
+                    .replace(Regex("""[\\/:*?"<>|]"""), "_")
+                val dst = java.io.File(dir, safeName)
+                if (path.startsWith("http://") || path.startsWith("https://")) {
+                    val conn = java.net.URL(path).openConnection() as java.net.HttpURLConnection
+                    conn.connectTimeout = 5000
+                    conn.readTimeout = 60000
+                    if (conn.responseCode !in 200..299) {
+                        throw IllegalStateException("下载失败（${conn.responseCode}）")
+                    }
+                    var copied = 0L
+                    conn.inputStream.use { input ->
+                        dst.outputStream().use { out ->
+                            val buf = ByteArray(64 * 1024)
+                            while (true) {
+                                val n = input.read(buf)
+                                if (n < 0) break
+                                out.write(buf, 0, n)
+                                copied += n
+                                if (copied > shareMaxBytes) {
+                                    throw IllegalStateException("文件超过 512MB 分享上限")
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    val src = java.io.File(path)
+                    if (!src.exists() || !src.isFile) {
+                        throw IllegalStateException("文件不存在：$path")
+                    }
+                    if (src.length() > shareMaxBytes) {
+                        throw IllegalStateException("文件超过 512MB 分享上限")
+                    }
+                    src.inputStream().use { input -> dst.outputStream().use { input.copyTo(it) } }
+                }
+                val uri = androidx.core.content.FileProvider.getUriForFile(
+                    context, "${context.packageName}.fileprovider", dst,
+                )
+                val ext = safeName.substringAfterLast('.', "").lowercase()
+                val mime = android.webkit.MimeTypeMap.getSingleton()
+                    .getMimeTypeFromExtension(ext) ?: "application/octet-stream"
+                val send = android.content.Intent(android.content.Intent.ACTION_SEND)
+                    .setType(mime)
+                    .putExtra(android.content.Intent.EXTRA_STREAM, uri)
+                    .addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                val chooser = android.content.Intent.createChooser(send, "分享 $safeName")
+                    .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                context.startActivity(chooser)
+                resolve(callId, """{"ok":true}""")
+            } catch (e: Throwable) {
+                reject(callId, e.message ?: "分享失败")
+            }
+        }
+    }
+
+    /**
      * 手机本地运行时（0.14.29）：启动/复用打包在 APK 里的完整 vantaloom-api
      * 子进程，resolve {"baseUrl":"http://127.0.0.1:<port>"}。前台服务保活与
      * 组网节点同一个（dataSync）。幂等——已在跑直接返回。
@@ -159,6 +253,126 @@ class LoomJsBridge(
     internal fun resolveFromShell(callId: String, payloadJson: String) = resolve(callId, payloadJson)
 
     internal fun rejectFromShell(callId: String, message: String) = reject(callId, message)
+
+    /**
+     * 文件选择结果物化（worker）：优先解真实路径（ExternalStorageProvider——
+     * 同 UID 的运行时子进程在「所有文件访问」授权下可直读）；解不出真实路径的
+     * provider（如「下载」分类视图）流拷到应用缓存后返回缓存路径。
+     */
+    internal fun materializeFilesAsync(callId: String, uris: List<Uri>) {
+        worker.execute {
+            try {
+                val arr = JSONArray()
+                for (uri in uris.take(pickMaxFiles)) {
+                    val entry = materializeFile(uri) ?: continue
+                    arr.put(entry)
+                }
+                resolve(callId, JSONObject().put("files", arr).toString())
+            } catch (e: Throwable) {
+                reject(callId, e.message ?: "文件处理失败")
+            }
+        }
+    }
+
+    private fun materializeFile(uri: Uri): JSONObject? {
+        val name = queryDisplayName(uri)
+            ?: uri.lastPathSegment?.substringAfterLast('/')
+            ?: "file"
+        val real = resolveRealPath(uri)
+        if (real != null) {
+            val f = java.io.File(real)
+            if (f.exists() && f.isFile) {
+                return JSONObject().put("path", real).put("name", name).put("size", f.length())
+            }
+        }
+        val dir = java.io.File(context.cacheDir, "import").apply { mkdirs() }
+        val safe = name.replace(Regex("""[\\/:*?"<>|]"""), "_")
+        val dst = java.io.File(dir, "${System.currentTimeMillis()}-$safe")
+        context.contentResolver.openInputStream(uri)?.use { input ->
+            dst.outputStream().use { input.copyTo(it) }
+        } ?: return null
+        return JSONObject().put("path", dst.absolutePath).put("name", name).put("size", dst.length())
+    }
+
+    /**
+     * 文件夹统计（worker）：树 URI → 真实路径 → 递归计数（文件数/总字节）。
+     * 复制不在这里做——由运行时 draft-import 端点原生执行；这里只产确认弹窗
+     * 需要的数字。超出 walk 上限即停并标 capped（前端按自己的限额拒绝）。
+     */
+    internal fun walkFolderAsync(callId: String, treeUri: Uri) {
+        worker.execute {
+            try {
+                val docId = android.provider.DocumentsContract.getTreeDocumentId(treeUri)
+                val real = externalDocIdToPath(docId)
+                    ?: throw IllegalStateException("该位置不支持文件夹导入，请选择手机存储中的文件夹")
+                val root = java.io.File(real)
+                if (!root.exists() || !root.isDirectory) {
+                    throw IllegalStateException("文件夹不可访问：$real")
+                }
+                var count = 0
+                var bytes = 0L
+                var capped = false
+                val stack = ArrayDeque<java.io.File>()
+                stack.add(root)
+                outer@ while (stack.isNotEmpty()) {
+                    val dir = stack.removeFirst()
+                    val children = dir.listFiles() ?: continue
+                    for (child in children) {
+                        if (child.isDirectory) {
+                            stack.add(child)
+                        } else {
+                            count++
+                            bytes += child.length()
+                        }
+                        if (count > walkMaxFiles || bytes > walkMaxBytes) {
+                            capped = true
+                            break@outer
+                        }
+                    }
+                }
+                val folder = JSONObject()
+                    .put("path", root.absolutePath)
+                    .put("name", root.name)
+                    .put("fileCount", count)
+                    .put("totalBytes", bytes)
+                    .put("capped", capped)
+                resolve(callId, JSONObject().put("folder", folder).toString())
+            } catch (e: Throwable) {
+                reject(callId, e.message ?: "读取文件夹失败")
+            }
+        }
+    }
+
+    private fun resolveRealPath(uri: Uri): String? {
+        if (!android.provider.DocumentsContract.isDocumentUri(context, uri)) return null
+        if (uri.authority != "com.android.externalstorage.documents") return null
+        return externalDocIdToPath(android.provider.DocumentsContract.getDocumentId(uri))
+    }
+
+    private fun externalDocIdToPath(docId: String): String? {
+        val parts = docId.split(":", limit = 2)
+        if (parts.isEmpty() || parts[0].isBlank()) return null
+        val base = if (parts[0].equals("primary", ignoreCase = true)) {
+            @Suppress("DEPRECATION")
+            android.os.Environment.getExternalStorageDirectory().absolutePath
+        } else {
+            "/storage/${parts[0]}"
+        }
+        val rel = if (parts.size > 1) parts[1] else ""
+        return if (rel.isBlank()) base else "$base/$rel"
+    }
+
+    private fun queryDisplayName(uri: Uri): String? = try {
+        context.contentResolver.query(
+            uri,
+            arrayOf(android.provider.OpenableColumns.DISPLAY_NAME),
+            null,
+            null,
+            null,
+        )?.use { c -> if (c.moveToFirst()) c.getString(0) else null }
+    } catch (_: Throwable) {
+        null
+    }
 
     /**
      * Decode + downscale (long edge ≤ [pickMaxEdge], EXIF 转正) + JPEG q85 +
@@ -271,5 +485,16 @@ class LoomJsBridge(
 
         /** 长边像素上限——超过按 2 的幂降采样（与桌面端 read 读图口径一致）。 */
         private const val pickMaxEdge = 2048
+
+        /** 单次最多带回的文件数（composer chip 行的合理上限）。 */
+        private const val pickMaxFiles = 10
+
+        /** 文件夹 walk 上限——略高于运行时 draft-import 限额（1000 个 / 512MB），
+         *  让适度超限的场景能报出真实数字，远超才标 capped。 */
+        private const val walkMaxFiles = 1500
+        private const val walkMaxBytes = 768L * 1024 * 1024
+
+        /** 分享拷贝上限。 */
+        private const val shareMaxBytes = 512L * 1024 * 1024
     }
 }

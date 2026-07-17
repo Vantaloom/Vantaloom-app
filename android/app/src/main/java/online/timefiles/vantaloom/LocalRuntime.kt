@@ -66,10 +66,16 @@ object LocalRuntime {
 
         val proc = builder.start()
         process = proc
-        // 运行时日志进 logcat——手机上唯一的诊断通路。
+        // 运行时日志进 logcat——手机上唯一的诊断通路。通知标记行被截获转成
+        // 系统通知（RuntimeNotifications），不进 logcat。
+        val appContext = context.applicationContext
         Thread {
             try {
-                proc.inputStream.bufferedReader().forEachLine { line -> Log.i(TAG, line) }
+                proc.inputStream.bufferedReader().forEachLine { line ->
+                    if (!RuntimeNotifications.handleMarkerLine(appContext, line)) {
+                        Log.i(TAG, line)
+                    }
+                }
             } catch (_: Throwable) {
                 // 进程退出时流关闭，正常收尾。
             }

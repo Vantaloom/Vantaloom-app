@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- FileProvider 暴露面：仅相机拍照的缓存目录（MainActivity.launchImagePick）。 -->
+<!-- FileProvider 暴露面：相机拍照缓存 + 分享出站缓存（LoomJsBridge.shareFile）。 -->
 <paths>
     <cache-path name="camera" path="camera/" />
+    <cache-path name="share" path="share/" />
 </paths>
