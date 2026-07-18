@@ -117,6 +117,7 @@ class PackageRuntimeTests(unittest.TestCase):
         self.assertIn('"host_arch": expected_host_arch', build_script)
         self.assertIn('"target_arch": "arm64"', build_script)
         self.assertIn('"want_separate_host_toolset": 1', build_script)
+        self.assertIn('config.gypi out/Makefile "$EXPECTED_NODE_HOST_ARCH"', build_script)
         self.assertIn('"aarch64-linux-android" in value', build_script)
 
     def test_python_dependency_license_locks_are_exact(self):

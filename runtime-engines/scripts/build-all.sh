@@ -174,7 +174,7 @@ export LDFLAGS="${LDFLAGS:-} -Wl,-z,max-page-size=16384 -Wl,--build-id=sha1"
   --with-intl=small-icu \
   --without-npm \
   --without-corepack
-"$PYTHON_BIN" - config.gypi Makefile "$EXPECTED_NODE_HOST_ARCH" <<'PY'
+"$PYTHON_BIN" - config.gypi out/Makefile "$EXPECTED_NODE_HOST_ARCH" <<'PY'
 import json
 import pathlib
 import sys
