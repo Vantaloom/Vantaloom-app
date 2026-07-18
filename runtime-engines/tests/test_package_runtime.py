@@ -119,6 +119,7 @@ class PackageRuntimeTests(unittest.TestCase):
         self.assertIn('"want_separate_host_toolset": 1', build_script)
         self.assertIn('config.gypi out/Makefile "$EXPECTED_NODE_HOST_ARCH"', build_script)
         self.assertIn('"aarch64-linux-android" in value', build_script)
+        self.assertIn('make -s -j "$JOBS"', build_script)
 
     def test_python_dependency_license_locks_are_exact(self):
         lock = package_runtime.load_lock(RUNTIME_ROOT / "sources.lock.json")

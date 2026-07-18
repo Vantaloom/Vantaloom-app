@@ -207,7 +207,7 @@ if set(host_lines) != host_keys:
 if any("aarch64-linux-android" in value for value in host_lines.values()):
     raise SystemExit(f"Node host tools use the Android cross-toolchain: {host_lines}")
 PY
-make -j "$JOBS"
+make -s -j "$JOBS"
 NODE_BINARY="$NODE_SOURCE/out/Release/node"
 if [[ ! -f "$NODE_BINARY" ]]; then
   echo "ERROR: Node build did not produce $NODE_BINARY" >&2

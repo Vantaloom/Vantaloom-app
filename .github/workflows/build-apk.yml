@@ -116,7 +116,7 @@ jobs:
         timeout-minutes: 80
         env:
           CACHE_DIR: ${{ github.workspace }}/${{ env.RUNTIME_CACHE }}
-          JOBS: "3"
+          JOBS: "2"
           OUT_DIR: ${{ github.workspace }}/${{ env.RUNTIME_DIST }}
           PYTHON_BIN: python3
         run: |
@@ -125,7 +125,17 @@ jobs:
           BUILD_LOG="$RUNNER_TEMP/runtime-build.log"
           if ! bash runtime-engines/scripts/build-all.sh 2>&1 | tee "$BUILD_LOG"; then
             ERROR_LAST="$(tail -n 1 "$BUILD_LOG" | sed -e 's/%/%25/g' -e 's/\r/%0D/g')"
-            ERROR_PAYLOAD="$(tail -n 160 "$BUILD_LOG" | gzip -c | base64 -w0)"
+            while IFS= read -r ERROR_LINE; do
+              [[ -n "$ERROR_LINE" ]] || continue
+              ERROR_LINE="${ERROR_LINE:0:3000}"
+              ERROR_LINE="${ERROR_LINE//'%'/'%25'}"
+              ERROR_LINE="${ERROR_LINE//$'\r'/'%0D'}"
+              echo "::error file=.github,line=1,title=Android runtime compiler error::$ERROR_LINE"
+            done < <(
+              grep -Eai 'fatal error:|error:|undefined reference|killed|out of memory|no space left|ld\.lld:|make(\[[0-9]+\])?: \*\*\*' "$BUILD_LOG" |
+                tail -n 12
+            )
+            ERROR_PAYLOAD="$(tail -n 160 "$BUILD_LOG" | tac | gzip -c | base64 -w0)"
             echo "::error file=.github,line=1,title=Android runtime build failure::${ERROR_LAST:-runtime build failed} [gzip-base64:${ERROR_PAYLOAD}]"
             {
               echo "### Android runtime build failure"
