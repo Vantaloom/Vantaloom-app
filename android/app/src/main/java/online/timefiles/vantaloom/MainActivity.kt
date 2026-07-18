@@ -4,6 +4,7 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.Intent
+import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.drawable.ColorDrawable
@@ -25,6 +26,7 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.webkit.WebViewAssetLoader
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
+import java.io.ByteArrayInputStream
 import java.io.File
 
 /**
@@ -77,7 +79,7 @@ class MainActivity : Activity() {
         }
 
         val assetLoader = WebViewAssetLoader.Builder()
-            .setDomain(LOOM_DOMAIN)
+            .setDomain(ShellSecurity.appHost)
             .setHttpAllowed(true) // http://vantaloom.localhost — a *.localhost secure context
             .addPathHandler("/", WebViewAssetLoader.AssetsPathHandler(this))
             .build()
@@ -92,7 +94,8 @@ class MainActivity : Activity() {
             ),
         )
         setContentView(root)
-        WebView.setWebContentsDebuggingEnabled(true)
+        val isDebuggable = applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0
+        WebView.setWebContentsDebuggingEnabled(isDebuggable)
 
         // Initial chrome: match the launch theme (light) until the web reports its
         // real theme through setChrome.
@@ -127,13 +130,49 @@ class MainActivity : Activity() {
         }
 
         webView.webViewClient = object : WebViewClient() {
+            override fun shouldOverrideUrlLoading(
+                view: WebView,
+                request: WebResourceRequest,
+            ): Boolean {
+                val raw = request.url.toString()
+                if (ShellSecurity.isTrustedAppUrl(raw)) return false
+                // The privileged bridge must never accompany an external document,
+                // including an untrusted iframe. Main-frame links are handed to a
+                // separate app; subframe navigations fail closed.
+                if (request.isForMainFrame) openExternalNavigation(raw)
+                return true
+            }
+
             override fun shouldInterceptRequest(
                 view: WebView,
                 request: WebResourceRequest,
-            ): WebResourceResponse? = assetLoader.shouldInterceptRequest(request.url)
+            ): WebResourceResponse? {
+                if (ShellSecurity.isTrustedAppUrl(request.url.toString())) {
+                    return assetLoader.shouldInterceptRequest(request.url)
+                }
+                // Some WebView versions do not consistently invoke
+                // shouldOverrideUrlLoading for subframes. Block navigation-shaped
+                // requests here too, while leaving CORS fetches/images untouched.
+                if (ShellSecurity.isDocumentNavigation(request.isForMainFrame, request.requestHeaders)) {
+                    return WebResourceResponse(
+                        "text/plain",
+                        "UTF-8",
+                        403,
+                        "Blocked external document",
+                        emptyMap(),
+                        ByteArrayInputStream(ByteArray(0)),
+                    )
+                }
+                return null
+            }
 
             override fun onPageStarted(view: WebView, url: String?, favicon: android.graphics.Bitmap?) {
                 super.onPageStarted(view, url, favicon)
+                if (!ShellSecurity.isTrustedAppUrl(url)) {
+                    view.stopLoading()
+                    openExternalNavigation(url)
+                    return
+                }
                 // Fallback injection for WebViews without DOCUMENT_START_SCRIPT.
                 if (!WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
                     view.evaluateJavascript(BRIDGE_SHIM, null)
@@ -162,13 +201,31 @@ class MainActivity : Activity() {
         // Guaranteed-early injection so window.__loomBridge exists before any page
         // script runs (preferred over onPageStarted).
         if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
-            WebViewCompat.addDocumentStartJavaScript(webView, BRIDGE_SHIM, setOf("*"))
+            WebViewCompat.addDocumentStartJavaScript(
+                webView,
+                BRIDGE_SHIM,
+                setOf(ShellSecurity.documentStartOriginRule),
+            )
         }
 
         if (savedInstanceState == null) {
-            webView.loadUrl("http://$LOOM_DOMAIN/index.html")
+            loadBundledApp()
         } else {
-            webView.restoreState(savedInstanceState)
+            val restored = webView.restoreState(savedInstanceState)
+            if (!ShellSecurity.isTrustedAppUrl(restored?.currentItem?.url)) {
+                loadBundledApp()
+            }
+        }
+    }
+
+    private fun loadBundledApp() {
+        webView.loadUrl("${ShellSecurity.appOrigin}/index.html")
+    }
+
+    private fun openExternalNavigation(raw: String?) {
+        if (!ShellSecurity.canOpenExternally(raw)) return
+        runCatching {
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(raw)))
         }
     }
 
@@ -404,7 +461,12 @@ class MainActivity : Activity() {
     override fun onDestroy() {
         // Deliberately do NOT stop the overlay node here: the foreground service
         // keeps it alive across Activity teardown (config change / warm restart);
-        // the node is torn down only via __loomBridge.stop().
+        // work ends only through the bridge or the notification's explicit stop.
+        if (::webView.isInitialized) {
+            webView.removeJavascriptInterface("__loomNative")
+            webView.stopLoading()
+            webView.destroy()
+        }
         super.onDestroy()
     }
 
@@ -417,7 +479,6 @@ class MainActivity : Activity() {
     }
 
     companion object {
-        private const val LOOM_DOMAIN = "vantaloom.localhost"
         private const val REQ_NOTIF = 100
         private const val REQ_PICK_CAMERA = 101
         private const val REQ_PICK_GALLERY = 102
@@ -462,11 +523,171 @@ class MainActivity : Activity() {
          * own registry + a (callId, ok, payload) resolver the web side clobbered),
          * so every async call timed out while native had actually succeeded.
          */
-        private const val BRIDGE_SHIM = """
+        private val BRIDGE_SHIM = """
 (function () {
   if (window.__loomBridge) return;
   var N = window.__loomNative;
   if (!N) return;
+  var localRuntimeAuth = null;
+
+  function normalizedHttpOrigin(raw) {
+    try {
+      var url = new URL(String(raw), window.location.href);
+      if (url.protocol === "ws:") url.protocol = "http:";
+      if (url.protocol === "wss:") url.protocol = "https:";
+      return url.origin;
+    } catch (_) {
+      return "";
+    }
+  }
+
+  function isLocalRuntimeUrl(raw) {
+    return !!localRuntimeAuth && normalizedHttpOrigin(raw) === localRuntimeAuth.origin;
+  }
+
+  function authenticatedStreamUrl(raw) {
+    if (!isLocalRuntimeUrl(raw)) return raw;
+    try {
+      var signed = N.authorizeLocalRuntimeUrl(String(raw));
+      return signed ? String(signed) : raw;
+    } catch (_) {
+      return raw;
+    }
+  }
+
+  function hasLocalRuntimeQueryAuth(raw) {
+    if (!isLocalRuntimeUrl(raw)) return false;
+    try {
+      var url = new URL(String(raw), window.location.href);
+      return url.searchParams.has("${LoopbackAuth.expirationQueryParameter}") &&
+        url.searchParams.has("${LoopbackAuth.queryParameter}");
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Object.defineProperty(window, "__loomInstallLocalRuntimeAuth", {
+    configurable: false,
+    enumerable: false,
+    value: function (baseUrl, bearerToken) {
+      try {
+        var base = new URL(String(baseUrl));
+        var normalizedBearer = String(bearerToken || "");
+        if (base.protocol !== "http:" || base.hostname !== "127.0.0.1" || !base.port) return false;
+        if (!/^[0-9a-f]{64}$/.test(normalizedBearer)) return false;
+        localRuntimeAuth = {
+          origin: base.origin,
+          bearerToken: normalizedBearer
+        };
+        return true;
+      } catch (_) {
+        return false;
+      }
+    }
+  });
+
+  Object.defineProperty(window, "__loomClearLocalRuntimeAuth", {
+    configurable: false,
+    enumerable: false,
+    value: function () { localRuntimeAuth = null; }
+  });
+
+  Object.defineProperty(window, "__loomAuthorizeLocalRuntimeURL", {
+    configurable: false,
+    enumerable: false,
+    writable: false,
+    value: function (rawUrl) { return authenticatedStreamUrl(rawUrl); }
+  });
+
+  // A same-session reload can restore the persisted local runtime target without
+  // calling startLocalRuntime again. Ask native to re-install the still-live
+  // process capability into this new document; no token is returned to callers.
+  try {
+    if (typeof N.restoreLocalRuntimeAuth === "function") N.restoreLocalRuntimeAuth();
+  } catch (_) {}
+
+  if (!window.__loomRuntimeAuthPatched) {
+    Object.defineProperty(window, "__loomRuntimeAuthPatched", {
+      configurable: false,
+      enumerable: false,
+      value: true
+    });
+
+    var nativeFetch = window.fetch.bind(window);
+    window.fetch = function (input, init) {
+      var request;
+      try {
+        request = new Request(input, init);
+      } catch (error) {
+        return Promise.reject(error);
+      }
+      if (!isLocalRuntimeUrl(request.url)) return nativeFetch(input, init);
+      if (hasLocalRuntimeQueryAuth(request.url)) return nativeFetch(request);
+      try {
+        var headers = new Headers(request.headers);
+        headers.set("Authorization", "Bearer " + localRuntimeAuth.bearerToken);
+        return nativeFetch(new Request(request, { headers: headers }));
+      } catch (error) {
+        return Promise.reject(error);
+      }
+    };
+
+    if (window.XMLHttpRequest) {
+      var xhrUrls = new WeakMap();
+      var nativeXhrOpen = XMLHttpRequest.prototype.open;
+      var nativeXhrSend = XMLHttpRequest.prototype.send;
+      XMLHttpRequest.prototype.open = function (method, url) {
+        xhrUrls.set(this, String(url));
+        return nativeXhrOpen.apply(this, arguments);
+      };
+      XMLHttpRequest.prototype.send = function () {
+        if (isLocalRuntimeUrl(xhrUrls.get(this)) && !hasLocalRuntimeQueryAuth(xhrUrls.get(this))) {
+          this.setRequestHeader("Authorization", "Bearer " + localRuntimeAuth.bearerToken);
+        }
+        return nativeXhrSend.apply(this, arguments);
+      };
+    }
+
+    if (window.EventSource) {
+      var NativeEventSource = window.EventSource;
+      var AuthenticatedEventSource = function (url, config) {
+        var authenticatedUrl = authenticatedStreamUrl(url);
+        return arguments.length > 1
+          ? new NativeEventSource(authenticatedUrl, config)
+          : new NativeEventSource(authenticatedUrl);
+      };
+      AuthenticatedEventSource.prototype = NativeEventSource.prototype;
+      try { Object.setPrototypeOf(AuthenticatedEventSource, NativeEventSource); } catch (_) {}
+      window.EventSource = AuthenticatedEventSource;
+    }
+
+    if (window.WebSocket) {
+      var NativeWebSocket = window.WebSocket;
+      var AuthenticatedWebSocket = function (url, protocols) {
+        var authenticatedUrl = authenticatedStreamUrl(url);
+        return arguments.length > 1
+          ? new NativeWebSocket(authenticatedUrl, protocols)
+          : new NativeWebSocket(authenticatedUrl);
+      };
+      AuthenticatedWebSocket.prototype = NativeWebSocket.prototype;
+      try { Object.setPrototypeOf(AuthenticatedWebSocket, NativeWebSocket); } catch (_) {}
+      window.WebSocket = AuthenticatedWebSocket;
+    }
+  }
+
+  // Android has no tab/window surface. Route safe window.open requests through
+  // the top frame so WebViewClient can externalize them; never create a second
+  // privileged WebView or allow javascript:/data:/intent: URLs.
+  window.open = function (rawUrl) {
+    try {
+      if (rawUrl == null || String(rawUrl).trim() === "") return null;
+      var targetUrl = new URL(String(rawUrl), window.location.href);
+      if (["http:", "https:", "mailto:", "tel:"].indexOf(targetUrl.protocol) < 0) return null;
+      window.top.location.assign(targetUrl.href);
+    } catch (_) {}
+    return null;
+  };
+
   window.__loomBridge = {
     isNative: function () { return true; },
     deviceId: function () { return N.deviceId(); },
@@ -488,9 +709,10 @@ class MainActivity : Activity() {
     shareFile: function (path, name, callbackId) {
       N.shareFile(callbackId, String(path || ""), String(name || ""));
     },
-    startLocalRuntime: function (callbackId) { N.startLocalRuntime(callbackId); }
+    startLocalRuntime: function (callbackId) { N.startLocalRuntime(callbackId); },
+    stopLocalRuntime: function (callbackId) { N.stopLocalRuntime(callbackId); }
   };
 })();
-"""
+""".trimIndent()
     }
 }

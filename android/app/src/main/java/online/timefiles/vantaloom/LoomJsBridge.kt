@@ -90,9 +90,10 @@ class LoomJsBridge(
             try {
                 LoomForegroundService.start(context)
                 val dataDir = context.filesDir.absolutePath
-                Loom.ensure().startNode(dataDir, hubBaseUrl, machineId, hubToken)
+                Loom.startNode(dataDir, hubBaseUrl, machineId, hubToken)
                 resolve(callId, "")
             } catch (e: Throwable) {
+                LoomForegroundService.stopIfIdle(context)
                 reject(callId, e.message ?: "startNode failed")
             }
         }
@@ -234,20 +235,48 @@ class LoomJsBridge(
     /**
      * 手机本地运行时（0.14.29）：启动/复用打包在 APK 里的完整 vantaloom-api
      * 子进程，resolve {"baseUrl":"http://127.0.0.1:<port>"}。前台服务保活与
-     * 组网节点同一个（dataSync）。幂等——已在跑直接返回。
+     * 组网节点共用用户可停止的 specialUse 会话。幂等——已在跑直接返回。
      */
     @JavascriptInterface
     fun startLocalRuntime(callId: String) {
         worker.execute {
             try {
                 LoomForegroundService.start(context)
-                val port = LocalRuntime.ensureStarted(context)
-                resolve(callId, JSONObject().put("baseUrl", "http://127.0.0.1:$port").toString())
+                val endpoint = LocalRuntime.ensureStarted(context)
+                installLocalRuntimeAuth(endpoint)
+                resolve(callId, JSONObject().put("baseUrl", endpoint.baseUrl).toString())
             } catch (e: Throwable) {
+                LoomForegroundService.stopIfIdle(context)
                 reject(callId, e.message ?: "本地运行时启动失败")
             }
         }
     }
+
+    /** Stop the packaged runtime after its persisted Hub identity is cleared. */
+    @JavascriptInterface
+    fun stopLocalRuntime(callId: String) {
+        worker.execute {
+            try {
+                LocalRuntime.stop()
+                evalJs("window.__loomClearLocalRuntimeAuth && window.__loomClearLocalRuntimeAuth()")
+                resolve(callId, "")
+            } catch (e: Throwable) {
+                reject(callId, e.message ?: "本地运行时停止失败")
+            } finally {
+                LoomForegroundService.stopIfIdle(context)
+            }
+        }
+    }
+
+    /** Reinstall the live child runtime auth into a newly loaded WebView document. */
+    @JavascriptInterface
+    fun restoreLocalRuntimeAuth() {
+        LocalRuntime.currentEndpoint()?.let(::installLocalRuntimeAuth)
+    }
+
+    /** Sign a current-runtime resource/stream URL without exposing the capability key. */
+    @JavascriptInterface
+    fun authorizeLocalRuntimeUrl(raw: String): String = LocalRuntime.authorizeLocalRuntimeUrl(raw)
 
     /** Shell-side promise fulfilment (MainActivity 的选择流程用)。 */
     internal fun resolveFromShell(callId: String, payloadJson: String) = resolve(callId, payloadJson)
@@ -452,13 +481,22 @@ class LoomJsBridge(
     fun stopNode(callId: String) {
         worker.execute {
             try {
-                Loom.get()?.stop()
-                LoomForegroundService.stop(context)
+                Loom.stop()
                 resolve(callId, "")
             } catch (e: Throwable) {
                 reject(callId, e.message ?: "stop failed")
+            } finally {
+                LoomForegroundService.stopIfIdle(context)
             }
         }
+    }
+
+    private fun installLocalRuntimeAuth(endpoint: LocalRuntime.Endpoint) {
+        evalJs(
+            "window.__loomInstallLocalRuntimeAuth && " +
+                "window.__loomInstallLocalRuntimeAuth(${quote(endpoint.baseUrl)}, " +
+                "${quote(endpoint.bearerToken)})",
+        )
     }
 
     /**

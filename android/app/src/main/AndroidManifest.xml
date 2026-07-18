@@ -4,9 +4,9 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-    <!-- Foreground service keeps the overlay node alive while the app is backgrounded. -->
+    <!-- User-started foreground session keeps the local runtime / overlay alive. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <!-- Notifications: required to show the foreground-service notification on API 33+. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- 文件/文件夹导入(0.14.31): 「所有文件访问」特殊权限——同 UID 的运行时
@@ -58,7 +58,11 @@
             android:name=".LoomForegroundService"
             android:enabled="true"
             android:exported="false"
-            android:foregroundServiceType="dataSync" />
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="User-started local development runtime and device overlay connection" />
+        </service>
 
         <!-- 相机拍照的输出文件经 FileProvider 暴露给相机应用（cache/camera/）。 -->
         <provider

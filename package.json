@@ -1,6 +1,6 @@
 {
   "name": "vantaloom-android",
-  "version": "0.13.0",
+  "version": "0.14.32",
   "private": true,
-  "description": "Vantaloom mobile client — native Kotlin WebView shell embedding the loomnet Go overlay as a gomobile AAR (no Tauri, no Rust, no VpnService). Wraps the prebuilt Vantaloom web UI (web/) and drives peer runtimes over a 127.0.0.1 overlay loopback proxy."
+  "description": "Vantaloom Android client — native Kotlin WebView shell with controller mode, an on-device vantaloom-api runtime, loomnet overlay, and APK-bundled Python, Node.js, and restricted Go engines."
 }

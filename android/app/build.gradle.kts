@@ -11,10 +11,10 @@ android {
         applicationId = "online.timefiles.vantaloom"
         minSdk = 24
         targetSdk = 34
-        // versionCode / versionName are overridable from CI (-PversionCode / -PversionName)
-        // so every build is a distinct, upgradable artifact.
+        // CI only overrides versionCode so every APK remains upgradable. Keep
+        // versionName tied to the product release instead of inventing a build suffix.
         versionCode = (project.findProperty("versionCode") as String?)?.toIntOrNull() ?: 1
-        versionName = (project.findProperty("versionName") as String?) ?: "0.13.0"
+        versionName = "0.14.32"
 
         // The gomobile AAR ships a per-ABI .so; the CI binds android/arm64 only.
         ndk {
@@ -53,12 +53,14 @@ android {
         // 40 asset entries instead of thousands and the app froze forever on the
         // prerendered spinner. This is the default pattern minus that one rule;
         // the CI workflow additionally asserts assets/_next/ made it into the APK.
-        ignoreAssetsPattern = "!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~"
+        // Keep runtime-engine dotfiles such as npm's .npmrc: they are covered
+        // by the signed manifest and Kotlin verifies every declared asset.
+        ignoreAssetsPattern = "!.svn:!.git:!.ds_store:!*.scc:!CVS:!thumbs.db:!picasa.ini:!*~"
     }
 
     packaging {
         jniLibs {
-            // 本地运行时（0.14.29）：jniLibs 里的 libvantaloom.so 是完整的
+            // 本地运行时（0.14.32）：jniLibs 里的 libvantaloom.so 是完整的
             // vantaloom-api（纯 Go 可执行文件伪装成 .so），必须解压到
             // nativeLibraryDir 才能被 ProcessBuilder exec（Android 10+ 禁止从
             // 可写目录执行）。useLegacyPackaging=true 关闭「从 APK 内直接
@@ -78,4 +80,7 @@ dependencies {
 
     implementation("androidx.webkit:webkit:1.11.0")
     implementation("androidx.core:core-ktx:1.13.1")
+
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20240303")
 }

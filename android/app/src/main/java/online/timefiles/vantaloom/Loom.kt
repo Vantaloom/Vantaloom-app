@@ -15,6 +15,8 @@ import online.timefiles.mobile.Mobile
 object Loom {
     @Volatile
     private var bridge: Bridge? = null
+    @Volatile
+    private var started = false
 
     /** Returns the node bridge, creating it on first use. */
     @Synchronized
@@ -28,12 +30,25 @@ object Loom {
     /** The node bridge if it has been created, else null. */
     fun get(): Bridge? = bridge
 
+    /** Starts (or idempotently reuses) the overlay and records FGS ownership. */
+    @Synchronized
+    fun startNode(dataDir: String, hubBaseUrl: String, machineId: String, hubToken: String) {
+        ensure().startNode(dataDir, hubBaseUrl, machineId, hubToken)
+        started = true
+    }
+
+    fun isStarted(): Boolean = started
+
     /**
      * Stops the overlay node (loopback proxy, sessions, Hub client). The Bridge
      * instance is retained and can be restarted with StartNode again.
      */
     @Synchronized
     fun stop() {
-        bridge?.stop()
+        try {
+            bridge?.stop()
+        } finally {
+            started = false
+        }
     }
 }

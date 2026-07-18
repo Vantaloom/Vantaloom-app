@@ -6,6 +6,7 @@ on:
     paths:
       - "android/**"
       - "mobile-src/**"
+      - "runtime-engines/**"
       - "web/**"
       - ".github/workflows/build-apk.yml"
   workflow_dispatch:
@@ -17,7 +18,7 @@ concurrency:
 jobs:
   build-apk:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 150
     permissions:
       contents: write # tag + create a release and upload the APK as a permanent asset
     env:
@@ -25,7 +26,10 @@ jobs:
       GOMOBILE_TARGET: android/arm64
       ANDROID_API: "24"
       NDK_VER: "26.0.10792818"
+      X_MOBILE_VERSION: "v0.0.0-20260709172247-6129f5bee9d5"
       AAR_OUT: android/app/libs/loomnet.aar
+      RUNTIME_CACHE: runtime-engines/.cache
+      RUNTIME_DIST: runtime-engines/dist
     steps:
       - uses: actions/checkout@v4
 
@@ -39,6 +43,14 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: "1.26.x"
+          cache-dependency-path: |
+            mobile-src/go.sum
+            runtime-engines/go-runner/go.sum
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
@@ -51,23 +63,159 @@ jobs:
           echo "ANDROID_NDK_HOME=$NDK_DIR" >> "$GITHUB_ENV"
           echo "ANDROID_NDK_ROOT=$NDK_DIR" >> "$GITHUB_ENV"
 
+      - name: Install native runtime build prerequisites
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            build-essential \
+            ca-certificates \
+            file \
+            make \
+            patch \
+            perl \
+            pkg-config \
+            rsync \
+            unzip \
+            xz-utils
+
+      - name: Record runtime build toolchain versions
+        id: runtime-toolchain
+        run: |
+          set -euo pipefail
+          echo "go=$(go env GOVERSION)" >> "$GITHUB_OUTPUT"
+          echo "python=$(python3 -c 'import platform; print(platform.python_version())')" >> "$GITHUB_OUTPUT"
+
+      - name: Test runtime and WebView bridge contracts
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s runtime-engines/tests -p 'test_*.py' -v
+          python3 -m py_compile \
+            runtime-engines/scripts/package_runtime.py \
+            runtime-engines/tests/test_package_runtime.py
+          (cd runtime-engines/go-runner && go test ./...)
+          node --test android/app/src/test/js/bridge-shim.test.mjs
+
+      - name: Cache verified runtime source downloads
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.RUNTIME_CACHE }}
+          key: runtime-sources-v1-${{ runner.os }}-${{ hashFiles('runtime-engines/sources.lock.json') }}
+          restore-keys: |
+            runtime-sources-v1-${{ runner.os }}-
+
+      - name: Cache compiled Android runtimes
+        id: runtime-build-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.RUNTIME_DIST }}
+          key: runtime-dist-v1-${{ runner.os }}-${{ steps.runtime-toolchain.outputs.go }}-py${{ steps.runtime-toolchain.outputs.python }}-ndk${{ env.NDK_VER }}-${{ hashFiles('runtime-engines/sources.lock.json', 'runtime-engines/scripts/**', 'runtime-engines/src/**', 'runtime-engines/go-runner/**') }}
+
+      - name: Build bundled Python, Node.js, and Go runtimes
+        if: steps.runtime-build-cache.outputs.cache-hit != 'true'
+        timeout-minutes: 80
+        env:
+          CACHE_DIR: ${{ github.workspace }}/${{ env.RUNTIME_CACHE }}
+          JOBS: "3"
+          OUT_DIR: ${{ github.workspace }}/${{ env.RUNTIME_DIST }}
+          PYTHON_BIN: python3
+        run: |
+          set -euo pipefail
+          rm -rf "$OUT_DIR"
+          bash runtime-engines/scripts/build-all.sh
+
+      - name: Validate Android runtime bundle
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          DIST="$GITHUB_WORKSPACE/$RUNTIME_DIST"
+          NATIVE="$DIST/jniLibs/arm64-v8a"
+          READELF="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
+
+          test -x "$READELF"
+          test -f "$DIST/runtime-engines.manifest.json"
+          test -f "$DIST/assets/runtime-engines/manifest.json"
+          cmp "$DIST/runtime-engines.manifest.json" "$DIST/assets/runtime-engines/manifest.json"
+
+          for name in python node go; do
+            binary="$NATIVE/libvantaloom_${name}.so"
+            test -f "$binary"
+            "$READELF" -h "$binary" | grep -Eq 'Class:[[:space:]]+ELF64'
+            "$READELF" -h "$binary" | grep -Eq 'Type:[[:space:]]+DYN'
+            "$READELF" -h "$binary" | grep -Eq 'Machine:[[:space:]]+AArch64'
+            "$READELF" -lW "$binary" | grep -q '/system/bin/linker64'
+          done
+
+          native_count=0
+          while IFS= read -r -d '' binary; do
+            native_count=$((native_count + 1))
+            "$READELF" -h "$binary" | grep -Eq 'Class:[[:space:]]+ELF64'
+            "$READELF" -h "$binary" | grep -Eq 'Type:[[:space:]]+DYN'
+            "$READELF" -h "$binary" | grep -Eq 'Machine:[[:space:]]+AArch64'
+            mapfile -t load_alignments < <("$READELF" -lW "$binary" | awk '$1 == "LOAD" { print $NF }')
+            if [ "${#load_alignments[@]}" -eq 0 ]; then
+              echo "ERROR: no LOAD segments found in $binary"
+              exit 1
+            fi
+            for alignment in "${load_alignments[@]}"; do
+              if [[ ! "$alignment" =~ ^0x[0-9A-Fa-f]+$ ]]; then
+                echo "ERROR: invalid LOAD alignment $alignment in $binary"
+                exit 1
+              fi
+              alignment_value=$((alignment))
+              if (( alignment_value < 16384 || alignment_value % 16384 != 0 )); then
+                echo "ERROR: $binary is not 16 KB page aligned (LOAD alignment $alignment)"
+                exit 1
+              fi
+            done
+          done < <(find "$NATIVE" -maxdepth 1 -type f -name '*.so' -print0)
+          if [ "$native_count" -lt 4 ]; then
+            echo "ERROR: runtime native bundle is incomplete ($native_count ELF files)"
+            exit 1
+          fi
+
+          python3 - "$DIST" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          dist = pathlib.Path(sys.argv[1])
+          assets = dist / "assets" / "runtime-engines"
+          manifest = json.loads((assets / "manifest.json").read_text(encoding="utf-8"))
+          if manifest.get("schemaVersion") != 1:
+              raise SystemExit("runtime manifest schemaVersion must be 1")
+          missing = {"python", "node", "go"} - set(manifest.get("engines", {}))
+          if missing:
+              raise SystemExit(f"runtime manifest is missing engines: {sorted(missing)}")
+          elf_assets = []
+          for path in assets.rglob("*"):
+              if not path.is_file():
+                  continue
+              with path.open("rb") as stream:
+                  if stream.read(4) == b"\x7fELF":
+                      elf_assets.append(path.relative_to(dist).as_posix())
+          if elf_assets:
+              raise SystemExit(f"ELF files are forbidden in runtime assets: {elf_assets}")
+          PY
+
       - name: Install gomobile + gobind
         run: |
           set -euo pipefail
-          go install golang.org/x/mobile/cmd/gomobile@latest
-          go install golang.org/x/mobile/cmd/gobind@latest
+          go install "golang.org/x/mobile/cmd/gomobile@${X_MOBILE_VERSION}"
+          go install "golang.org/x/mobile/cmd/gobind@${X_MOBILE_VERSION}"
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
       - name: gomobile init
         run: gomobile init
 
       - name: Bind the loomnet overlay facade → AAR
+        timeout-minutes: 20
         run: |
           set -euo pipefail
           mkdir -p "$(dirname "$AAR_OUT")"
           pushd mobile-src
           # The generated bind code depends on the x/mobile bind runtime.
-          go get golang.org/x/mobile/bind
+          go get "golang.org/x/mobile/bind@${X_MOBILE_VERSION}"
           gomobile bind \
             -target="${GOMOBILE_TARGET}" \
             -androidapi "${ANDROID_API}" \
@@ -83,6 +231,12 @@ jobs:
           if [ ! -f web/index.html ]; then
             echo "ERROR: web/ export missing (expected the committed Next.js export)"; exit 1
           fi
+          forbidden_web_files="$(find web -type f \( -name '*.map' -o -name '*.ts' -o -name '*.tsx' -o -name '*.jsx' \) -print)"
+          if [ -n "$forbidden_web_files" ]; then
+            echo "ERROR: public web bundle contains source/sourcemap files:" >&2
+            printf '%s\n' "$forbidden_web_files" >&2
+            exit 1
+          fi
           mkdir -p android/app/src/main/assets
           # Copy the export to the assets root so absolute /_next/... paths resolve
           # under the vantaloom.localhost origin. Drop the placeholder README.
@@ -90,18 +244,34 @@ jobs:
           cp -r web/. android/app/src/main/assets/
           echo "Staged $(find android/app/src/main/assets -type f | wc -l) web files."
 
+      - name: Stage bundled runtimes into the Android app
+        run: |
+          set -euo pipefail
+          DIST="$GITHUB_WORKSPACE/$RUNTIME_DIST"
+          JNI_TARGET="android/app/src/main/jniLibs/arm64-v8a"
+          ASSET_TARGET="android/app/src/main/assets/runtime-engines"
+          mkdir -p "$JNI_TARGET" "$ASSET_TARGET"
+          rsync -a "$DIST/jniLibs/arm64-v8a/" "$JNI_TARGET/"
+          rsync -a --delete "$DIST/assets/runtime-engines/" "$ASSET_TARGET/"
+          echo "Staged $(find "$JNI_TARGET" -maxdepth 1 -type f -name '*.so' | wc -l) native runtime libraries."
+          echo "Staged $(find "$ASSET_TARGET" -type f | wc -l) runtime asset files."
+
       - name: Set up Gradle 8.9
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.9"
 
+      - name: Test Android native runtime contracts
+        working-directory: android
+        run: gradle :app:testDebugUnitTest --no-daemon --stacktrace
+
       - name: Assemble release APK (unsigned)
         working-directory: android
+        timeout-minutes: 30
         run: |
           set -euo pipefail
           gradle :app:assembleRelease --no-daemon --stacktrace \
-            -PversionCode="${GITHUB_RUN_NUMBER}" \
-            -PversionName="0.14.11-build${GITHUB_RUN_NUMBER}"
+            -PversionCode="${GITHUB_RUN_NUMBER}"
 
       - name: Assert the web bundle survived AAPT (assets/_next present)
         run: |
@@ -119,6 +289,62 @@ jobs:
             echo "ERROR: assets/_next/ missing or nearly empty ($NEXT_COUNT entries) — the web JS bundle did not make it into the APK."
             exit 1
           fi
+
+      - name: Assert bundled runtimes survived APK packaging
+        run: |
+          set -euo pipefail
+          APK="android/app/build/outputs/apk/release/app-release-unsigned.apk"
+          APK_ENTRIES="$RUNNER_TEMP/vantaloom-apk-entries.txt"
+          unzip -Z1 "$APK" > "$APK_ENTRIES"
+          for entry in \
+            assets/runtime-engines/manifest.json \
+            lib/arm64-v8a/libvantaloom.so \
+            lib/arm64-v8a/libgojni.so \
+            lib/arm64-v8a/libvantaloom_python.so \
+            lib/arm64-v8a/libvantaloom_node.so \
+            lib/arm64-v8a/libvantaloom_go.so \
+            lib/arm64-v8a/libpython3.14.so; do
+            if ! grep -Fxq "$entry" "$APK_ENTRIES"; then
+              echo "ERROR: required runtime entry is missing from APK: $entry"
+              exit 1
+            fi
+          done
+          python3 - "$APK" <<'PY'
+          import hashlib
+          import json
+          import sys
+          import zipfile
+
+          apk = sys.argv[1]
+          manifest_path = "assets/runtime-engines/manifest.json"
+          with zipfile.ZipFile(apk) as archive:
+              manifest = json.loads(archive.read(manifest_path))
+              missing = {"python", "node", "go"} - set(manifest.get("engines", {}))
+              if manifest.get("schemaVersion") != 1 or missing:
+                  raise SystemExit(
+                      f"invalid runtime manifest in APK; missing={sorted(missing)}"
+                  )
+
+              checked = 0
+              for record in manifest.get("files", []):
+                  path = record.get("path", "")
+                  if not path.startswith("assets/runtime-engines/"):
+                      continue
+                  try:
+                      payload = archive.read(path)
+                  except KeyError as error:
+                      raise SystemExit(
+                          f"manifest-declared runtime asset is missing from APK: {path}"
+                      ) from error
+                  if len(payload) != record.get("size"):
+                      raise SystemExit(f"runtime asset size mismatch in APK: {path}")
+                  if hashlib.sha256(payload).hexdigest() != record.get("sha256"):
+                      raise SystemExit(f"runtime asset hash mismatch in APK: {path}")
+                  checked += 1
+              if checked == 0:
+                  raise SystemExit("runtime manifest declared no packaged data assets")
+              print(f"Verified {checked} manifest-declared runtime assets in APK.")
+          PY
 
       - name: Sign release APK (keystore from GitHub secrets)
         env:
@@ -148,7 +374,8 @@ jobs:
             --ks-key-alias "${SIGNING_KEY_ALIAS}" \
             --key-pass "pass:${SIGNING_KEY_PASSWORD}" \
             "$ALIGNED"
-          "$BUILD_TOOLS/apksigner" verify --verbose "$ALIGNED" || true
+          "$BUILD_TOOLS/zipalign" -c -v 4 "$ALIGNED"
+          "$BUILD_TOOLS/apksigner" verify --verbose --print-certs "$ALIGNED"
 
           mkdir -p dist
           SHA="$(git rev-parse --short HEAD)"
@@ -173,7 +400,8 @@ jobs:
           TAG="apk-build${GITHUB_RUN_NUMBER}-${SHA}"
           APK="dist/${APK_NAME}"
           gh release create "$TAG" "$APK" \
+            --target "$GITHUB_SHA" \
             --title "Vantaloom Android · build ${GITHUB_RUN_NUMBER} (${SHA})" \
-            --notes "Native Kotlin shell + loomnet overlay (gomobile AAR). Signature changed from the old debug key: uninstall any previous build once, then install." \
+            --notes "Vantaloom 0.14.32 Android local-first client with the native local runtime, loomnet overlay, and bundled Python/Node.js/Go engines. Signed with the stable project release key for in-place upgrades." \
             --latest
           echo "Released $TAG → $(basename "$APK")"

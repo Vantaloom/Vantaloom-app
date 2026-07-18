@@ -14,6 +14,7 @@ android/captures/
 
 # The loomnet facade AAR is built by CI (gomobile bind) into app/libs/
 android/app/libs/*.aar
+android/app/libs/*-sources.jar
 
 # The compiled web export is staged into app assets by CI (source of truth: web/)
 android/app/src/main/assets/*

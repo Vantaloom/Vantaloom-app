@@ -1,0 +1,185 @@
+{
+  "schemaVersion": 1,
+  "target": {
+    "abi": "arm64-v8a",
+    "androidTriple": "aarch64-linux-android",
+    "minApi": 24,
+    "targetSdk": 34,
+    "ndkVersion": "26.0.10792818",
+    "sourceDateEpoch": 1782172800
+  },
+  "goRunner": {
+    "version": "0.1.0",
+    "yaegi": {
+      "module": "github.com/traefik/yaegi",
+      "version": "v0.16.1",
+      "url": "https://proxy.golang.org/github.com/traefik/yaegi/@v/v0.16.1.zip",
+      "size": 2875058,
+      "sha256": "5c0361ff94ea34b377f932ad33381c2fba8a7367e94fd899bf9bcf9e0379c0ef",
+      "goModuleSum": "h1:f1De3DVJqIDKmnasUF6MwmWv1dSEEat0wcpXhD2On3E=",
+      "goModSum": "h1:4eVhbPb3LnD2VigQjhYbEJ69vDRFdT2HQNrXx8eEwUY=",
+      "license": {
+        "spdx": "Apache-2.0",
+        "pathInModule": "LICENSE",
+        "url": "https://raw.githubusercontent.com/traefik/yaegi/v0.16.1/LICENSE"
+      }
+    }
+  },
+  "artifacts": {
+    "python": {
+      "name": "CPython Android embeddable package",
+      "version": "3.14.6",
+      "stdlibVersion": "3.14",
+      "url": "https://www.python.org/ftp/python/3.14.6/python-3.14.6-aarch64-linux-android.tar.gz",
+      "filename": "python-3.14.6-aarch64-linux-android.tar.gz",
+      "size": 22358404,
+      "sha256": "38bbe77d3167b5cd554e03b1021324926f09f3825202b065951dd7638e9c37e5",
+      "sigstoreUrl": "https://www.python.org/ftp/python/3.14.6/python-3.14.6-aarch64-linux-android.tar.gz.sigstore",
+      "license": {
+        "spdx": "PSF-2.0",
+        "pathInArtifact": "prefix/lib/python3.14/LICENSE.txt",
+        "url": "https://docs.python.org/3.14/license.html"
+      },
+      "bundledComponents": [
+        {
+          "id": "bzip2",
+          "name": "bzip2",
+          "version": "1.0.8-3",
+          "license": {
+            "spdx": "bzip2-1.0.6",
+            "filename": "LICENSE",
+            "url": "https://gitlab.com/bzip2/bzip2/-/raw/bzip2-1.0.8/LICENSE",
+            "size": 1896,
+            "sha256": "c6dbbf828498be844a89eaa3b84adbab3199e342eb5cb2ed2f0d4ba7ec0f38a3"
+          }
+        },
+        {
+          "id": "libffi",
+          "name": "libffi",
+          "version": "3.4.4-3",
+          "license": {
+            "spdx": "MIT",
+            "filename": "LICENSE",
+            "url": "https://raw.githubusercontent.com/libffi/libffi/v3.4.4/LICENSE",
+            "size": 1132,
+            "sha256": "2c9c2acb9743e6b007b91350475308aee44691d96aa20eacef8e199988c8c388"
+          }
+        },
+        {
+          "id": "openssl",
+          "name": "OpenSSL",
+          "version": "3.5.7-0",
+          "license": {
+            "spdx": "Apache-2.0",
+            "filename": "LICENSE.txt",
+            "url": "https://raw.githubusercontent.com/openssl/openssl/openssl-3.5.7/LICENSE.txt",
+            "size": 10175,
+            "sha256": "7d5450cb2d142651b8afa315b5f238efc805dad827d91ba367d8516bc9d49e7a"
+          }
+        },
+        {
+          "id": "sqlite",
+          "name": "SQLite",
+          "version": "3.50.4-0",
+          "license": {
+            "spdx": "blessing",
+            "filename": "LICENSE.md",
+            "url": "https://raw.githubusercontent.com/sqlite/sqlite/version-3.50.4/LICENSE.md",
+            "size": 3864,
+            "sha256": "a7a58d6022c090c528e3167026167b3141d682efc6a3c188b473ba59f1788fc7"
+          }
+        },
+        {
+          "id": "xz",
+          "name": "XZ Utils liblzma",
+          "version": "5.4.6-1",
+          "bundledLibrary": "liblzma",
+          "linkage": "static",
+          "license": {
+            "spdx": "LicenseRef-XZ-libLZMA-Public-Domain",
+            "filename": "COPYING",
+            "url": "https://raw.githubusercontent.com/tukaani-project/xz/v5.4.6/COPYING",
+            "size": 3347,
+            "sha256": "29a1e305b2e34eefe5d4602d00cde1d528b71c5d9f2eec5106972cf6ddb6f73f"
+          }
+        },
+        {
+          "id": "zstd",
+          "name": "zstd",
+          "version": "1.5.7-2",
+          "license": {
+            "spdx": "BSD-3-Clause",
+            "filename": "LICENSE",
+            "url": "https://raw.githubusercontent.com/facebook/zstd/v1.5.7/LICENSE",
+            "size": 1549,
+            "sha256": "7055266497633c9025b777c78eb7235af13922117480ed5c674677adc381c9d8"
+          }
+        },
+        {
+          "id": "expat",
+          "name": "Expat",
+          "version": "2.8.1",
+          "license": {
+            "spdx": "MIT",
+            "filename": "expat-2.8.1-LICENSE",
+            "url": "https://raw.githubusercontent.com/python/cpython/v3.14.6/Modules/expat/COPYING",
+            "size": 1144,
+            "sha256": "31b15de82aa19a845156169a17a5488bf597e561b2c318d159ed583139b25e87"
+          }
+        },
+        {
+          "id": "libmpdec",
+          "name": "libmpdec",
+          "version": "2.5.1",
+          "license": {
+            "spdx": "BSD-2-Clause",
+            "filename": "libmpdec-2.5.1-LICENSE.h",
+            "url": "https://raw.githubusercontent.com/python/cpython/v3.14.6/Modules/_decimal/libmpdec/crt.h",
+            "size": 1719,
+            "sha256": "7d31f1d0dd73b62964dab0f7a1724473bf87f1f95d8febf0b40c15430ae9a47c"
+          }
+        },
+        {
+          "id": "hacl-star",
+          "name": "HACL*",
+          "version": "8ba599b2f6c9701b3dc961db895b0856a2210f76",
+          "license": {
+            "spdx": "MIT",
+            "filename": "hacl-star-8ba599b2f6c9-MIT-NOTICE.c",
+            "url": "https://raw.githubusercontent.com/python/cpython/v3.14.6/Modules/_hacl/Hacl_Hash_SHA1.c",
+            "size": 15783,
+            "sha256": "ce08721d491f3b8a9bd4cde6c27bfcc8fc01471512ccca4bd3c0b764cb551d29"
+          }
+        }
+      ]
+    },
+    "node": {
+      "name": "Node.js source",
+      "version": "24.18.0",
+      "npmVersion": "11.16.0",
+      "url": "https://nodejs.org/dist/v24.18.0/node-v24.18.0.tar.xz",
+      "filename": "node-v24.18.0.tar.xz",
+      "archiveRoot": "node-v24.18.0",
+      "size": 55425872,
+      "sha256": "e94afde24db08e0c564ee7110a2d5aab51ee0059382c9fd8233c54eec47b28f9",
+      "checksumsUrl": "https://nodejs.org/dist/v24.18.0/SHASUMS256.txt",
+      "patches": [
+        {
+          "path": "src/patches/node-loopback-bind.patch",
+          "sha256": "7e3c81c145f3849e41fb1a073011c3c9eb832ecd64169b12708ddbb40adbb799",
+          "purpose": "Enforce loopback-only TCP/UDP binds and disable writable native addons in Node"
+        }
+      ],
+      "license": {
+        "spdx": "MIT",
+        "pathInArtifact": "LICENSE",
+        "url": "https://raw.githubusercontent.com/nodejs/node/v24.18.0/LICENSE"
+      },
+      "npmLicense": {
+        "spdx": "Artistic-2.0",
+        "pathInArtifact": "deps/npm/LICENSE",
+        "url": "https://raw.githubusercontent.com/npm/cli/v11.16.0/LICENSE"
+      }
+    }
+  }
+}
