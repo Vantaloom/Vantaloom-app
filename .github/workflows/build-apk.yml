@@ -124,6 +124,24 @@ jobs:
           rm -rf "$OUT_DIR"
           BUILD_LOG="$RUNNER_TEMP/runtime-build.log"
           if ! bash runtime-engines/scripts/build-all.sh 2>&1 | tee "$BUILD_LOG"; then
+            mapfile -t ERROR_FIELDS < <(
+              python3 - "$BUILD_LOG" <<'PY'
+              import base64
+              import gzip
+              import pathlib
+              import sys
+
+              lines = pathlib.Path(sys.argv[1]).read_bytes().splitlines()[-160:]
+              tail = b"\n".join(lines)
+              last = (lines[-1] if lines else b"runtime build failed").decode(
+                  "utf-8", errors="replace"
+              )
+              escaped = last.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+              print(escaped)
+              print(base64.b64encode(gzip.compress(tail)).decode("ascii"))
+              PY
+            )
+            echo "::error file=.github,line=1,title=Android runtime build failure::${ERROR_FIELDS[0]} [gzip-base64:${ERROR_FIELDS[1]}]"
             {
               echo "### Android runtime build failure"
               echo '```text'
