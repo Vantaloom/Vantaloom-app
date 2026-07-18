@@ -27,8 +27,8 @@ Android 0.14.32. It deliberately keeps executable code immutable:
 - Yaegi v0.16.1 for the pure-Go interpreted runner, pinned by Go module sums,
   proxy zip byte size and SHA256.
 - Android NDK 26.0.10792818, API 24, arm64-v8a.
-- Exact URLs, byte sizes, SHA256 values, SPDX metadata and the SHA256 of the
-  Vantaloom Node hardening patch.
+- Exact URLs, byte sizes, SHA256 values, SPDX metadata and the SHA256 of both
+  Vantaloom Node hardening patches.
 
 Downloads are written through a `.partial` file and are accepted only after
 both size and SHA256 match. Transient HTTPS failures get three short retries,
@@ -48,13 +48,17 @@ BSD-2-Clause and MIT notices; those files are packaged unmodified.
 
 Node documents Android as unsupported and untested upstream, although its
 source includes `android-configure`. The build mirrors that configuration with
-explicit flags and carries two narrowly scoped Android policies:
+explicit flags and carries three narrowly scoped Android policies:
 
 1. TCP and UDP binds in Node's native socket bindings reject every address
    except IPv4 `127.0.0.0/8` and IPv6 `::1`. Pure JavaScript cannot remove this
    check.
 2. Native Node addons are disabled, so npm content in writable storage remains
    JavaScript/data rather than downloadable `.node` code.
+3. V8 trap handling is unconditionally disabled. The pinned Node release's
+   bundled Android patch no longer applies to its own V8 source, so Vantaloom
+   carries a hash-locked equivalent and rejects any remaining enabled or
+   simulator definition before configuration.
 
 Node is never advertised or linked directly to `libvantaloom_node.so`. Both
 the native Android manifest and the managed `node` command enter through the
@@ -94,6 +98,8 @@ Optional variables:
 - `CACHE_DIR`: verified source cache; default `runtime-engines/.cache`.
 - `JOBS`: Node build parallelism.
 - `PYTHON_BIN`: Python 3 command used by the packager.
+- `CC_host`, `CXX_host`, `AR_host`, `LINK_host`: native host tools used only
+  for Node's build-time executables; defaults are `cc`, `c++`, `ar`, `c++`.
 
 The build emits:
 

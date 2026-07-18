@@ -122,7 +122,16 @@ jobs:
         run: |
           set -euo pipefail
           rm -rf "$OUT_DIR"
-          bash runtime-engines/scripts/build-all.sh
+          BUILD_LOG="$RUNNER_TEMP/runtime-build.log"
+          if ! bash runtime-engines/scripts/build-all.sh 2>&1 | tee "$BUILD_LOG"; then
+            {
+              echo "### Android runtime build failure"
+              echo '```text'
+              tail -n 160 "$BUILD_LOG"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
 
       - name: Validate Android runtime bundle
         timeout-minutes: 10

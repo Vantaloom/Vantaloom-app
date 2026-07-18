@@ -165,6 +165,11 @@
       "checksumsUrl": "https://nodejs.org/dist/v24.18.0/SHASUMS256.txt",
       "patches": [
         {
+          "path": "src/patches/node-disable-v8-trap-handler.patch",
+          "sha256": "810c507bcfba2be8c987698c7e9cdcc3d9ccf1b115ce46f71d68452a84fdb4de",
+          "purpose": "Force V8 trap handling off for the Android cross-build"
+        },
+        {
           "path": "src/patches/node-loopback-bind.patch",
           "sha256": "7e3c81c145f3849e41fb1a073011c3c9eb832ecd64169b12708ddbb40adbb799",
           "purpose": "Enforce loopback-only TCP/UDP binds and disable writable native addons in Node"

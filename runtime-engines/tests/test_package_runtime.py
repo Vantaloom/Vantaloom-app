@@ -63,6 +63,62 @@ class PackageRuntimeTests(unittest.TestCase):
             lock["artifacts"]["node"]["sha256"],
         )
 
+    def test_locked_node_patches_disable_v8_traps_fail_closed(self):
+        lock = package_runtime.load_lock(RUNTIME_ROOT / "sources.lock.json")
+        patches = lock["artifacts"]["node"]["patches"]
+        self.assertEqual(
+            [
+                "src/patches/node-disable-v8-trap-handler.patch",
+                "src/patches/node-loopback-bind.patch",
+            ],
+            [patch["path"] for patch in patches],
+        )
+        self.assertEqual(
+            "810c507bcfba2be8c987698c7e9cdcc3d9ccf1b115ce46f71d68452a84fdb4de",
+            patches[0]["sha256"],
+        )
+
+        trap_patch = (RUNTIME_ROOT / patches[0]["path"]).read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("-// Arm64 (non-simulator) on Linux", trap_patch)
+        self.assertIn(
+            "+// Android runtime builds must keep V8 trap handling disabled.",
+            trap_patch,
+        )
+        self.assertEqual(
+            1, trap_patch.count("#define V8_TRAP_HANDLER_SUPPORTED false")
+        )
+        self.assertIn("-#define V8_TRAP_HANDLER_SUPPORTED true", trap_patch)
+
+        build_script = BUILD_ALL_PATH.read_text(encoding="utf-8")
+        self.assertNotIn("android-patches/trap-handler.h.patch", build_script)
+        for patch in patches:
+            self.assertIn(f'$RUNTIME_ROOT/{patch["path"]}', build_script)
+        self.assertEqual(2, build_script.count("patch --batch --forward -F 0 -p1"))
+        self.assertIn("TRAP_HANDLER_DEFINITION_COUNT", build_script)
+        self.assertIn("V8_TRAP_HANDLER_VIA_SIMULATOR", build_script)
+
+    def test_build_script_separates_node_host_and_target_toolchains(self):
+        build_script = BUILD_ALL_PATH.read_text(encoding="utf-8")
+        for assignment in (
+            'CC_host="${CC_host:-cc}"',
+            'CXX_host="${CXX_host:-c++}"',
+            'AR_host="${AR_host:-ar}"',
+            'LINK_host="${LINK_host:-$CXX_host}"',
+            "export CC_host CXX_host AR_host LINK_host",
+            'CC_target="$CC"',
+            'CXX_target="$CXX"',
+            'AR_target="$AR"',
+            'LINK_target="$CXX"',
+            "export CC_target CXX_target AR_target LINK_target",
+        ):
+            self.assertIn(assignment, build_script)
+        self.assertIn('"host_arch": expected_host_arch', build_script)
+        self.assertIn('"target_arch": "arm64"', build_script)
+        self.assertIn('"want_separate_host_toolset": 1', build_script)
+        self.assertIn('"aarch64-linux-android" in value', build_script)
+
     def test_python_dependency_license_locks_are_exact(self):
         lock = package_runtime.load_lock(RUNTIME_ROOT / "sources.lock.json")
         components = {

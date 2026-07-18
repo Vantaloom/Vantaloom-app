@@ -79,6 +79,29 @@ for tool in "$CC" "$CXX" "$AR" "$RANLIB" "$NM" "$READELF" "$STRIP"; do
   fi
 done
 
+CC_host="${CC_host:-cc}"
+CXX_host="${CXX_host:-c++}"
+AR_host="${AR_host:-ar}"
+LINK_host="${LINK_host:-$CXX_host}"
+CC_target="$CC"
+CXX_target="$CXX"
+AR_target="$AR"
+LINK_target="$CXX"
+for tool in "$CC_host" "$CXX_host" "$AR_host" "$LINK_host"; do
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    echo "ERROR: required host build tool is missing: $tool" >&2
+    exit 1
+  fi
+done
+case "$(uname -m)" in
+  x86_64) EXPECTED_NODE_HOST_ARCH="x64" ;;
+  arm64|aarch64) EXPECTED_NODE_HOST_ARCH="arm64" ;;
+  *)
+    echo "ERROR: unsupported Node build host architecture: $(uname -m)" >&2
+    exit 1
+    ;;
+esac
+
 WORK_PARENT="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
 WORK_DIR="$(mktemp -d "$WORK_PARENT/vantaloom-runtime.XXXXXX")"
 cleanup() {
@@ -112,12 +135,23 @@ NATIVE_STAGE="$OUT_DIR/jniLibs/arm64-v8a"
 GO_RUNNER_ROOT="$RUNTIME_ROOT/go-runner"
 
 pushd "$NODE_SOURCE" >/dev/null
-patch --batch --forward deps/v8/src/trap-handler/trap-handler.h \
-  < android-patches/trap-handler.h.patch
-patch --batch --forward -p1 \
+patch --batch --forward -F 0 -p1 \
+  < "$RUNTIME_ROOT/src/patches/node-disable-v8-trap-handler.patch"
+patch --batch --forward -F 0 -p1 \
   < "$RUNTIME_ROOT/src/patches/node-loopback-bind.patch"
-grep -q '^#define V8_TRAP_HANDLER_SUPPORTED false$' \
-  deps/v8/src/trap-handler/trap-handler.h
+TRAP_HANDLER_HEADER="deps/v8/src/trap-handler/trap-handler.h"
+TRAP_HANDLER_DEFINITION_COUNT="$(
+  grep -Ec '^#define V8_TRAP_HANDLER_SUPPORTED (true|false)$' \
+    "$TRAP_HANDLER_HEADER" || true
+)"
+if [[ "$TRAP_HANDLER_DEFINITION_COUNT" != "1" ]] \
+  || ! grep -qx '^#define V8_TRAP_HANDLER_SUPPORTED false$' \
+    "$TRAP_HANDLER_HEADER" \
+  || grep -q '^#define V8_TRAP_HANDLER_VIA_SIMULATOR$' \
+    "$TRAP_HANDLER_HEADER"; then
+  echo "ERROR: V8 trap handling is not unconditionally disabled." >&2
+  exit 1
+fi
 grep -q 'IsVantaloomLoopbackAddress' src/tcp_wrap.cc
 grep -q 'IsVantaloomLoopbackAddress' src/udp_wrap.cc
 grep -q 'Native addons are disabled in the Vantaloom Android runtime' \
@@ -125,6 +159,8 @@ grep -q 'Native addons are disabled in the Vantaloom Android runtime' \
 
 export PATH="$TOOLCHAIN_BIN:$PATH"
 export CC CXX AR RANLIB NM
+export CC_host CXX_host AR_host LINK_host
+export CC_target CXX_target AR_target LINK_target
 export GYP_DEFINES="target_arch=arm64 v8_target_arch=arm64 android_target_arch=arm64 host_os=$GYP_HOST_OS OS=android android_ndk_path=$NDK_ROOT"
 export CFLAGS="${CFLAGS:-} -ffile-prefix-map=$NODE_SOURCE=/usr/src/node -fdebug-prefix-map=$NODE_SOURCE=/usr/src/node"
 export CXXFLAGS="${CXXFLAGS:-} -ffile-prefix-map=$NODE_SOURCE=/usr/src/node -fdebug-prefix-map=$NODE_SOURCE=/usr/src/node"
@@ -138,6 +174,39 @@ export LDFLAGS="${LDFLAGS:-} -Wl,-z,max-page-size=16384 -Wl,--build-id=sha1"
   --with-intl=small-icu \
   --without-npm \
   --without-corepack
+"$PYTHON_BIN" - config.gypi Makefile "$EXPECTED_NODE_HOST_ARCH" <<'PY'
+import json
+import pathlib
+import sys
+
+config_path = pathlib.Path(sys.argv[1])
+makefile_path = pathlib.Path(sys.argv[2])
+expected_host_arch = sys.argv[3]
+config_text = config_path.read_text(encoding="utf-8")
+config = json.loads(config_text[config_text.index("{") :])
+variables = config["variables"]
+expected = {
+    "host_arch": expected_host_arch,
+    "target_arch": "arm64",
+    "want_separate_host_toolset": 1,
+}
+actual = {key: variables.get(key) for key in expected}
+if actual != expected:
+    raise SystemExit(
+        f"Node cross-build configuration mismatch: expected {expected}, got {actual}"
+    )
+
+host_keys = {"CC.host", "CXX.host", "AR.host", "LINK.host"}
+host_lines = {}
+for line in makefile_path.read_text(encoding="utf-8").splitlines():
+    key, separator, value = line.partition(" ?= ")
+    if separator and key in host_keys:
+        host_lines[key] = value
+if set(host_lines) != host_keys:
+    raise SystemExit(f"Node Makefile host toolchain is incomplete: {host_lines}")
+if any("aarch64-linux-android" in value for value in host_lines.values()):
+    raise SystemExit(f"Node host tools use the Android cross-toolchain: {host_lines}")
+PY
 make -j "$JOBS"
 NODE_BINARY="$NODE_SOURCE/out/Release/node"
 if [[ ! -f "$NODE_BINARY" ]]; then
