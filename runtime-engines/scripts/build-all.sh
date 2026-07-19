@@ -162,8 +162,10 @@ export CC CXX AR RANLIB NM
 export CC_host CXX_host AR_host LINK_host
 export CC_target CXX_target AR_target LINK_target
 export GYP_DEFINES="target_arch=arm64 v8_target_arch=arm64 android_target_arch=arm64 host_os=$GYP_HOST_OS OS=android android_ndk_path=$NDK_ROOT"
-export CFLAGS="${CFLAGS:-} -ffile-prefix-map=$NODE_SOURCE=/usr/src/node -fdebug-prefix-map=$NODE_SOURCE=/usr/src/node"
-export CXXFLAGS="${CXXFLAGS:-} -ffile-prefix-map=$NODE_SOURCE=/usr/src/node -fdebug-prefix-map=$NODE_SOURCE=/usr/src/node"
+# Drop debug info for the Node/V8 compile. Debug info multiplies peak clang RSS
+# on large V8 translation units and is stripped from the final binary anyway.
+export CFLAGS="${CFLAGS:-} -g0 -ffile-prefix-map=$NODE_SOURCE=/usr/src/node -fdebug-prefix-map=$NODE_SOURCE=/usr/src/node"
+export CXXFLAGS="${CXXFLAGS:-} -g0 -ffile-prefix-map=$NODE_SOURCE=/usr/src/node -fdebug-prefix-map=$NODE_SOURCE=/usr/src/node"
 export LDFLAGS="${LDFLAGS:-} -Wl,-z,max-page-size=16384 -Wl,--build-id=sha1"
 
 ./configure \
@@ -207,7 +209,16 @@ if set(host_lines) != host_keys:
 if any("aarch64-linux-android" in value for value in host_lines.values()):
     raise SystemExit(f"Node host tools use the Android cross-toolchain: {host_lines}")
 PY
-make -s -j "$JOBS"
+# Node/V8 is the memory peak of this script. Prefer NODE_JOBS when set so CI can
+# force -j1 while still letting host packaging use a higher JOBS value.
+NODE_JOBS="${NODE_JOBS:-$JOBS}"
+if ! [[ "$NODE_JOBS" =~ ^[1-9][0-9]*$ ]]; then
+  echo "ERROR: NODE_JOBS must be a positive integer, got: $NODE_JOBS" >&2
+  exit 1
+fi
+echo "Building Node with -j${NODE_JOBS} (JOBS=${JOBS})"
+# Keep a single line of progress without dumping every compiler command.
+make -j "$NODE_JOBS" V=0
 NODE_BINARY="$NODE_SOURCE/out/Release/node"
 if [[ ! -f "$NODE_BINARY" ]]; then
   echo "ERROR: Node build did not produce $NODE_BINARY" >&2

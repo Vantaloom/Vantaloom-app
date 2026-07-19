@@ -109,14 +109,34 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.RUNTIME_DIST }}
-          key: runtime-dist-v1-${{ runner.os }}-${{ steps.runtime-toolchain.outputs.go }}-py${{ steps.runtime-toolchain.outputs.python }}-ndk${{ env.NDK_VER }}-${{ hashFiles('runtime-engines/sources.lock.json', 'runtime-engines/scripts/**', 'runtime-engines/src/**', 'runtime-engines/go-runner/**') }}
+          key: runtime-dist-v2-${{ runner.os }}-${{ steps.runtime-toolchain.outputs.go }}-py${{ steps.runtime-toolchain.outputs.python }}-ndk${{ env.NDK_VER }}-${{ hashFiles('runtime-engines/sources.lock.json', 'runtime-engines/scripts/**', 'runtime-engines/src/**', 'runtime-engines/go-runner/**') }}
+
+      # Node/V8 arm64 cross-compiles can peak several GB per clang frontend process.
+      # Standard ubuntu-latest runners (≈16 GB) OOM-kill clang mid-V8 with even
+      # -j2, which surfaces as "clang frontend command failed with exit code 139".
+      # A dedicated swap file plus single-job Node compile keeps the build stable.
+      - name: Add swap for the Node/V8 cross-build
+        if: steps.runtime-build-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          sudo swapoff -a || true
+          sudo rm -f /swapfile
+          sudo fallocate -l 12G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -h
+          swapon --show
 
       - name: Build bundled Python, Node.js, and Go runtimes
         if: steps.runtime-build-cache.outputs.cache-hit != 'true'
-        timeout-minutes: 80
+        timeout-minutes: 120
         env:
           CACHE_DIR: ${{ github.workspace }}/${{ env.RUNTIME_CACHE }}
+          # Keep host-side packaging on two cores; Node itself is forced to -j1
+          # inside build-all.sh when NODE_JOBS is unset on CI.
           JOBS: "2"
+          NODE_JOBS: "1"
           OUT_DIR: ${{ github.workspace }}/${{ env.RUNTIME_DIST }}
           PYTHON_BIN: python3
         run: |
@@ -132,17 +152,24 @@ jobs:
               ERROR_LINE="${ERROR_LINE//$'\r'/'%0D'}"
               echo "::error file=.github,line=1,title=Android runtime compiler error::$ERROR_LINE"
             done < <(
-              grep -Eai 'fatal error:|error:|undefined reference|killed|out of memory|no space left|ld\.lld:|make(\[[0-9]+\])?: \*\*\*' "$BUILD_LOG" |
-                tail -n 12
+              grep -Eai 'fatal error:|error:|undefined reference|killed|out of memory|no space left|exit code 139|segmentation fault|signal 9|signal 11|ld\.lld:|make(\[[0-9]+\])?: \*\*\*' "$BUILD_LOG" |
+                tail -n 20
             )
-            ERROR_PAYLOAD="$(tail -n 160 "$BUILD_LOG" | tac | gzip -c | base64 -w0)"
-            echo "::error file=.github,line=1,title=Android runtime build failure::${ERROR_LAST:-runtime build failed} [gzip-base64:${ERROR_PAYLOAD}]"
             {
+              echo "### Memory snapshot at failure"
+              echo '```text'
+              free -h || true
+              swapon --show || true
+              echo '```'
               echo "### Android runtime build failure"
               echo '```text'
-              tail -n 160 "$BUILD_LOG"
+              tail -n 200 "$BUILD_LOG"
               echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
+            # Prefer the reverse log so the actual clang/make failure lands near
+            # the start of the annotation (GitHub truncates annotations ~4 KiB).
+            ERROR_PAYLOAD="$(tail -n 120 "$BUILD_LOG" | tac | gzip -c | base64 -w0)"
+            echo "::error file=.github,line=1,title=Android runtime build failure::${ERROR_LAST:-runtime build failed} [gzip-base64:${ERROR_PAYLOAD}]"
             exit 1
           fi
 
