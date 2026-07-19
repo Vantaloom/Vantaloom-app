@@ -97,9 +97,10 @@ Optional variables:
 - `OUT_DIR`: generated stage; default `runtime-engines/out` and must be empty.
 - `CACHE_DIR`: verified source cache; default `runtime-engines/.cache`.
 - `JOBS`: default parallelism for the script; also the fallback for Node.
-- `NODE_JOBS`: Node/V8 compile parallelism. GitHub Actions sets this to `1`
-  and adds a 12 GiB swap file because even `-j2` can OOM-kill clang
-  (`exit code 139`) on standard runners while compiling V8.
+- `NODE_JOBS`: Node/V8 compile parallelism. GitHub Actions sets this to `2`
+  and adds a 16 GiB swap file: bare `-j2` OOM-kills clang
+  (`exit code 139`), while `-j1` with swap is safe but exceeds a 120-minute
+  step budget. Combined with `-g0`, `-j2` + swap is the CI tradeoff.
 - `PYTHON_BIN`: Python 3 command used by the packager.
 - `CC_host`, `CXX_host`, `AR_host`, `LINK_host`: native host tools used only
   for Node's build-time executables; defaults are `cc`, `c++`, `ar`, `c++`.

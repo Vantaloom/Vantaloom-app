@@ -210,7 +210,7 @@ if any("aarch64-linux-android" in value for value in host_lines.values()):
     raise SystemExit(f"Node host tools use the Android cross-toolchain: {host_lines}")
 PY
 # Node/V8 is the memory peak of this script. Prefer NODE_JOBS when set so CI can
-# force -j1 while still letting host packaging use a higher JOBS value.
+# pin a lower parallel compile while host packaging still uses JOBS.
 NODE_JOBS="${NODE_JOBS:-$JOBS}"
 if ! [[ "$NODE_JOBS" =~ ^[1-9][0-9]*$ ]]; then
   echo "ERROR: NODE_JOBS must be a positive integer, got: $NODE_JOBS" >&2
@@ -218,6 +218,8 @@ if ! [[ "$NODE_JOBS" =~ ^[1-9][0-9]*$ ]]; then
 fi
 echo "Building Node with -j${NODE_JOBS} (JOBS=${JOBS})"
 # Keep a single line of progress without dumping every compiler command.
+# On low-RAM hosts, raise swap and lower NODE_JOBS rather than relying on
+# make's jobserver to stay under the OOM killer.
 make -j "$NODE_JOBS" V=0
 NODE_BINARY="$NODE_SOURCE/out/Release/node"
 if [[ ! -f "$NODE_BINARY" ]]; then

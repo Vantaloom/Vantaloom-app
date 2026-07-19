@@ -111,17 +111,17 @@ jobs:
           path: ${{ env.RUNTIME_DIST }}
           key: runtime-dist-v2-${{ runner.os }}-${{ steps.runtime-toolchain.outputs.go }}-py${{ steps.runtime-toolchain.outputs.python }}-ndk${{ env.NDK_VER }}-${{ hashFiles('runtime-engines/sources.lock.json', 'runtime-engines/scripts/**', 'runtime-engines/src/**', 'runtime-engines/go-runner/**') }}
 
-      # Node/V8 arm64 cross-compiles can peak several GB per clang frontend process.
-      # Standard ubuntu-latest runners (≈16 GB) OOM-kill clang mid-V8 with even
-      # -j2, which surfaces as "clang frontend command failed with exit code 139".
-      # A dedicated swap file plus single-job Node compile keeps the build stable.
+      # Node/V8 arm64 cross-compiles peak several GB per clang frontend process.
+      # Without swap, even -j2 OOMs (clang exit 139). With swap + -g0, -j1 is
+      # safe but exceeds a 120-minute step budget on ubuntu-latest. Use 16G
+      # swap and -j2 so V8 finishes inside the job timeout.
       - name: Add swap for the Node/V8 cross-build
         if: steps.runtime-build-cache.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
           sudo swapoff -a || true
           sudo rm -f /swapfile
-          sudo fallocate -l 12G /swapfile
+          sudo fallocate -l 16G /swapfile
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
           sudo swapon /swapfile
@@ -130,20 +130,37 @@ jobs:
 
       - name: Build bundled Python, Node.js, and Go runtimes
         if: steps.runtime-build-cache.outputs.cache-hit != 'true'
-        timeout-minutes: 120
+        # Job timeout is 150; leave a few minutes for packaging/signing after Node.
+        timeout-minutes: 140
         env:
           CACHE_DIR: ${{ github.workspace }}/${{ env.RUNTIME_CACHE }}
-          # Keep host-side packaging on two cores; Node itself is forced to -j1
-          # inside build-all.sh when NODE_JOBS is unset on CI.
           JOBS: "2"
-          NODE_JOBS: "1"
+          # -j2 + 16G swap + -g0 is the working CI tradeoff: -j1 timed out at
+          # 120m; bare -j2 without swap OOM-killed clang.
+          NODE_JOBS: "2"
           OUT_DIR: ${{ github.workspace }}/${{ env.RUNTIME_DIST }}
           PYTHON_BIN: python3
         run: |
           set -euo pipefail
           rm -rf "$OUT_DIR"
           BUILD_LOG="$RUNNER_TEMP/runtime-build.log"
-          if ! bash runtime-engines/scripts/build-all.sh 2>&1 | tee "$BUILD_LOG"; then
+          # Heartbeat so a long quiet V=0 compile still looks alive in the log.
+          (
+            while true; do
+              sleep 300
+              {
+                echo "---- runtime build heartbeat $(date -u +%Y-%m-%dT%H:%M:%SZ) ----"
+                free -h || true
+                swapon --show || true
+              } >> "$BUILD_LOG"
+            done
+          ) &
+          HEARTBEAT_PID=$!
+          cleanup_heartbeat() { kill "$HEARTBEAT_PID" 2>/dev/null || true; }
+          trap cleanup_heartbeat EXIT
+          if ! bash runtime-engines/scripts/build-all.sh 2>&1 | tee -a "$BUILD_LOG"; then
+            cleanup_heartbeat
+            trap - EXIT
             ERROR_LAST="$(tail -n 1 "$BUILD_LOG" | sed -e 's/%/%25/g' -e 's/\r/%0D/g')"
             while IFS= read -r ERROR_LINE; do
               [[ -n "$ERROR_LINE" ]] || continue
@@ -172,6 +189,8 @@ jobs:
             echo "::error file=.github,line=1,title=Android runtime build failure::${ERROR_LAST:-runtime build failed} [gzip-base64:${ERROR_PAYLOAD}]"
             exit 1
           fi
+          cleanup_heartbeat
+          trap - EXIT
 
       - name: Validate Android runtime bundle
         timeout-minutes: 10

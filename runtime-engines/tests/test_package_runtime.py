@@ -118,8 +118,8 @@ class PackageRuntimeTests(unittest.TestCase):
         self.assertIn('"target_arch": "arm64"', build_script)
         self.assertIn('"want_separate_host_toolset": 1', build_script)
         self.assertIn('config.gypi out/Makefile "$EXPECTED_NODE_HOST_ARCH"', build_script)
-        # CI can force a single clang frontend for V8 without lowering every
-        # other JOBS-driven step; -g0 keeps peak RSS down on large TUs.
+        # CI can pin Node/V8 parallelism without lowering every other JOBS-driven
+        # step; -g0 keeps peak RSS down on large TUs.
         self.assertIn('NODE_JOBS="${NODE_JOBS:-$JOBS}"', build_script)
         self.assertIn('make -j "$NODE_JOBS" V=0', build_script)
         self.assertIn("-g0", build_script)
