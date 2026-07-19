@@ -118,11 +118,20 @@ class PackageRuntimeTests(unittest.TestCase):
         self.assertIn('"target_arch": "arm64"', build_script)
         self.assertIn('"want_separate_host_toolset": 1', build_script)
         self.assertIn('config.gypi out/Makefile "$EXPECTED_NODE_HOST_ARCH"', build_script)
-        # CI can pin Node/V8 parallelism without lowering every other JOBS-driven
-        # step; -g0 keeps peak RSS down on large TUs.
-        self.assertIn('NODE_JOBS="${NODE_JOBS:-$JOBS}"', build_script)
-        self.assertIn('make -j "$NODE_JOBS" V=0', build_script)
+        # Staged commands let CI split the long Node compile into timed waves
+        # that share WORK_DIR; -g0 keeps peak RSS down on large TUs.
+        for command in (
+            "prepare)",
+            "node-configure)",
+            "node-compile)",
+            "package)",
+            "all)",
+        ):
+            self.assertIn(command, build_script)
+        self.assertIn('jobs="$(node_jobs)"', build_script)
+        self.assertIn('make -j "$jobs" V=0', build_script)
         self.assertIn("-g0", build_script)
+        self.assertIn("WORK_DIR", build_script)
         self.assertIn('"aarch64-linux-android" in value', build_script)
 
     def test_python_dependency_license_locks_are_exact(self):

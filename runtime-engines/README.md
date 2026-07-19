@@ -92,15 +92,33 @@ export ANDROID_NDK_HOME="$ANDROID_SDK_ROOT/ndk/26.0.10792818"
 bash runtime-engines/scripts/build-all.sh
 ```
 
+The script accepts staged commands so CI can split the long Node/V8 compile
+into separate GitHub Actions steps without restarting from scratch:
+
+```sh
+export WORK_DIR=/tmp/vantaloom-runtime-work
+bash runtime-engines/scripts/build-all.sh prepare
+bash runtime-engines/scripts/build-all.sh node-configure
+bash runtime-engines/scripts/build-all.sh node-compile   # resumable
+bash runtime-engines/scripts/build-all.sh package
+```
+
+`node-compile` is incremental: re-running it continues from existing object
+files under `$WORK_DIR`. GitHub Actions runs several soft-timeout waves of
+`node-compile` so each step stays under the Actions step timeout while the
+overall job can take multiple hours at `-j1`.
+
 Optional variables:
 
 - `OUT_DIR`: generated stage; default `runtime-engines/out` and must be empty.
 - `CACHE_DIR`: verified source cache; default `runtime-engines/.cache`.
+- `WORK_DIR`: persistent work tree shared across staged commands. Local `all`
+  runs create a private temp dir when unset.
 - `JOBS`: default parallelism for the script; also the fallback for Node.
-- `NODE_JOBS`: Node/V8 compile parallelism. GitHub Actions sets this to `2`
-  and adds a 16 GiB swap file: bare `-j2` OOM-kills clang
-  (`exit code 139`), while `-j1` with swap is safe but exceeds a 120-minute
-  step budget. Combined with `-g0`, `-j2` + swap is the CI tradeoff.
+- `NODE_JOBS`: Node/V8 compile parallelism. GitHub Actions pins this to `1`
+  and adds a 16 GiB swap file: bare `-j2` OOM-kills clang (`exit code 139`),
+  while `-j1` with swap is safe but too slow for a single Actions step, so CI
+  runs it as several soft-timeout waves.
 - `PYTHON_BIN`: Python 3 command used by the packager.
 - `CC_host`, `CXX_host`, `AR_host`, `LINK_host`: native host tools used only
   for Node's build-time executables; defaults are `cc`, `c++`, `ar`, `c++`.

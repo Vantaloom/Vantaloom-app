@@ -9,6 +9,7 @@ on:
       - "runtime-engines/**"
       - "web/**"
       - ".github/workflows/build-apk.yml"
+      - ".github/scripts/**"
   workflow_dispatch:
 
 concurrency:
@@ -18,7 +19,9 @@ concurrency:
 jobs:
   build-apk:
     runs-on: ubuntu-latest
-    timeout-minutes: 150
+    # Node/V8 arm64 at -j1 needs multiple soft-timeout waves; leave room for
+    # packaging + APK after the runtime engines are built.
+    timeout-minutes: 360
     permissions:
       contents: write # tag + create a release and upload the APK as a permanent asset
     env:
@@ -30,6 +33,8 @@ jobs:
       AAR_OUT: android/app/libs/loomnet.aar
       RUNTIME_CACHE: runtime-engines/.cache
       RUNTIME_DIST: runtime-engines/dist
+      # Persistent across prepare / configure / compile waves / package.
+      RUNTIME_WORK_DIR: ${{ runner.temp }}/vantaloom-runtime-work
     steps:
       - uses: actions/checkout@v4
 
@@ -109,12 +114,15 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.RUNTIME_DIST }}
-          key: runtime-dist-v2-${{ runner.os }}-${{ steps.runtime-toolchain.outputs.go }}-py${{ steps.runtime-toolchain.outputs.python }}-ndk${{ env.NDK_VER }}-${{ hashFiles('runtime-engines/sources.lock.json', 'runtime-engines/scripts/**', 'runtime-engines/src/**', 'runtime-engines/go-runner/**') }}
+          key: runtime-dist-v3-${{ runner.os }}-${{ steps.runtime-toolchain.outputs.go }}-py${{ steps.runtime-toolchain.outputs.python }}-ndk${{ env.NDK_VER }}-${{ hashFiles('runtime-engines/sources.lock.json', 'runtime-engines/scripts/**', 'runtime-engines/src/**', 'runtime-engines/go-runner/**') }}
 
-      # Node/V8 arm64 cross-compiles peak several GB per clang frontend process.
-      # Without swap, even -j2 OOMs (clang exit 139). With swap + -g0, -j1 is
-      # safe but exceeds a 120-minute step budget on ubuntu-latest. Use 16G
-      # swap and -j2 so V8 finishes inside the job timeout.
+      # Empirical CI matrix on ubuntu-latest:
+      #   -j2 bare        → clang frontend exit 139 (OOM)
+      #   -j1 + 12G swap  → survives but exceeds a single 120m step
+      #   -j2 + 16G swap  → still OOM on large V8 TUs
+      # So CI pins NODE_JOBS=1 + 16G swap and splits the compile into soft-timeout
+      # waves that share WORK_DIR. Each wave is its own Actions step so we can
+      # see which segment is slow without killing the whole job on step timeout.
       - name: Add swap for the Node/V8 cross-build
         if: steps.runtime-build-cache.outputs.cache-hit != 'true'
         run: |
@@ -128,69 +136,143 @@ jobs:
           free -h
           swapon --show
 
-      - name: Build bundled Python, Node.js, and Go runtimes
+      - name: Prepare runtime sources and Python stage
         if: steps.runtime-build-cache.outputs.cache-hit != 'true'
-        # Job timeout is 150; leave a few minutes for packaging/signing after Node.
-        timeout-minutes: 140
+        timeout-minutes: 20
         env:
           CACHE_DIR: ${{ github.workspace }}/${{ env.RUNTIME_CACHE }}
-          JOBS: "2"
-          # -j2 + 16G swap + -g0 is the working CI tradeoff: -j1 timed out at
-          # 120m; bare -j2 without swap OOM-killed clang.
-          NODE_JOBS: "2"
           OUT_DIR: ${{ github.workspace }}/${{ env.RUNTIME_DIST }}
+          WORK_DIR: ${{ env.RUNTIME_WORK_DIR }}
           PYTHON_BIN: python3
         run: |
           set -euo pipefail
-          rm -rf "$OUT_DIR"
-          BUILD_LOG="$RUNNER_TEMP/runtime-build.log"
-          # Heartbeat so a long quiet V=0 compile still looks alive in the log.
-          (
-            while true; do
-              sleep 300
-              {
-                echo "---- runtime build heartbeat $(date -u +%Y-%m-%dT%H:%M:%SZ) ----"
-                free -h || true
-                swapon --show || true
-              } >> "$BUILD_LOG"
-            done
-          ) &
-          HEARTBEAT_PID=$!
-          cleanup_heartbeat() { kill "$HEARTBEAT_PID" 2>/dev/null || true; }
-          trap cleanup_heartbeat EXIT
-          if ! bash runtime-engines/scripts/build-all.sh 2>&1 | tee -a "$BUILD_LOG"; then
-            cleanup_heartbeat
-            trap - EXIT
-            ERROR_LAST="$(tail -n 1 "$BUILD_LOG" | sed -e 's/%/%25/g' -e 's/\r/%0D/g')"
-            while IFS= read -r ERROR_LINE; do
-              [[ -n "$ERROR_LINE" ]] || continue
-              ERROR_LINE="${ERROR_LINE:0:3000}"
-              ERROR_LINE="${ERROR_LINE//'%'/'%25'}"
-              ERROR_LINE="${ERROR_LINE//$'\r'/'%0D'}"
-              echo "::error file=.github,line=1,title=Android runtime compiler error::$ERROR_LINE"
-            done < <(
-              grep -Eai 'fatal error:|error:|undefined reference|killed|out of memory|no space left|exit code 139|segmentation fault|signal 9|signal 11|ld\.lld:|make(\[[0-9]+\])?: \*\*\*' "$BUILD_LOG" |
-                tail -n 20
-            )
-            {
-              echo "### Memory snapshot at failure"
-              echo '```text'
-              free -h || true
-              swapon --show || true
-              echo '```'
-              echo "### Android runtime build failure"
-              echo '```text'
-              tail -n 200 "$BUILD_LOG"
-              echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
-            # Prefer the reverse log so the actual clang/make failure lands near
-            # the start of the annotation (GitHub truncates annotations ~4 KiB).
-            ERROR_PAYLOAD="$(tail -n 120 "$BUILD_LOG" | tac | gzip -c | base64 -w0)"
-            echo "::error file=.github,line=1,title=Android runtime build failure::${ERROR_LAST:-runtime build failed} [gzip-base64:${ERROR_PAYLOAD}]"
-            exit 1
-          fi
-          cleanup_heartbeat
-          trap - EXIT
+          rm -rf "$OUT_DIR" "$WORK_DIR"
+          mkdir -p "$WORK_DIR"
+          bash runtime-engines/scripts/build-all.sh prepare
+
+      - name: Configure Node for Android arm64
+        if: steps.runtime-build-cache.outputs.cache-hit != 'true'
+        timeout-minutes: 15
+        env:
+          CACHE_DIR: ${{ github.workspace }}/${{ env.RUNTIME_CACHE }}
+          OUT_DIR: ${{ github.workspace }}/${{ env.RUNTIME_DIST }}
+          WORK_DIR: ${{ env.RUNTIME_WORK_DIR }}
+          PYTHON_BIN: python3
+        run: |
+          set -euo pipefail
+          bash runtime-engines/scripts/build-all.sh node-configure
+
+      # Soft-timeout waves: `timeout` stops make cleanly so completed .o files
+      # stay on disk; the next wave resumes. Real compile errors (clang 139, …)
+      # still fail the wave hard and stop the job.
+      - name: Compile Node wave 1/6
+        if: steps.runtime-build-cache.outputs.cache-hit != 'true'
+        id: node-wave-1
+        timeout-minutes: 55
+        env:
+          CACHE_DIR: ${{ github.workspace }}/${{ env.RUNTIME_CACHE }}
+          OUT_DIR: ${{ github.workspace }}/${{ env.RUNTIME_DIST }}
+          WORK_DIR: ${{ env.RUNTIME_WORK_DIR }}
+          JOBS: "2"
+          NODE_JOBS: "1"
+          NODE_COMPILE_WAVE: "1/6"
+          PYTHON_BIN: python3
+        run: |
+          set -euo pipefail
+          bash .github/scripts/node-compile-wave.sh
+
+      - name: Compile Node wave 2/6
+        if: steps.runtime-build-cache.outputs.cache-hit != 'true'
+        id: node-wave-2
+        timeout-minutes: 55
+        env:
+          CACHE_DIR: ${{ github.workspace }}/${{ env.RUNTIME_CACHE }}
+          OUT_DIR: ${{ github.workspace }}/${{ env.RUNTIME_DIST }}
+          WORK_DIR: ${{ env.RUNTIME_WORK_DIR }}
+          JOBS: "2"
+          NODE_JOBS: "1"
+          NODE_COMPILE_WAVE: "2/6"
+          PYTHON_BIN: python3
+        run: |
+          set -euo pipefail
+          bash .github/scripts/node-compile-wave.sh
+
+      - name: Compile Node wave 3/6
+        if: steps.runtime-build-cache.outputs.cache-hit != 'true'
+        id: node-wave-3
+        timeout-minutes: 55
+        env:
+          CACHE_DIR: ${{ github.workspace }}/${{ env.RUNTIME_CACHE }}
+          OUT_DIR: ${{ github.workspace }}/${{ env.RUNTIME_DIST }}
+          WORK_DIR: ${{ env.RUNTIME_WORK_DIR }}
+          JOBS: "2"
+          NODE_JOBS: "1"
+          NODE_COMPILE_WAVE: "3/6"
+          PYTHON_BIN: python3
+        run: |
+          set -euo pipefail
+          bash .github/scripts/node-compile-wave.sh
+
+      - name: Compile Node wave 4/6
+        if: steps.runtime-build-cache.outputs.cache-hit != 'true'
+        id: node-wave-4
+        timeout-minutes: 55
+        env:
+          CACHE_DIR: ${{ github.workspace }}/${{ env.RUNTIME_CACHE }}
+          OUT_DIR: ${{ github.workspace }}/${{ env.RUNTIME_DIST }}
+          WORK_DIR: ${{ env.RUNTIME_WORK_DIR }}
+          JOBS: "2"
+          NODE_JOBS: "1"
+          NODE_COMPILE_WAVE: "4/6"
+          PYTHON_BIN: python3
+        run: |
+          set -euo pipefail
+          bash .github/scripts/node-compile-wave.sh
+
+      - name: Compile Node wave 5/6
+        if: steps.runtime-build-cache.outputs.cache-hit != 'true'
+        id: node-wave-5
+        timeout-minutes: 55
+        env:
+          CACHE_DIR: ${{ github.workspace }}/${{ env.RUNTIME_CACHE }}
+          OUT_DIR: ${{ github.workspace }}/${{ env.RUNTIME_DIST }}
+          WORK_DIR: ${{ env.RUNTIME_WORK_DIR }}
+          JOBS: "2"
+          NODE_JOBS: "1"
+          NODE_COMPILE_WAVE: "5/6"
+          PYTHON_BIN: python3
+        run: |
+          set -euo pipefail
+          bash .github/scripts/node-compile-wave.sh
+
+      - name: Compile Node wave 6/6
+        if: steps.runtime-build-cache.outputs.cache-hit != 'true'
+        id: node-wave-6
+        timeout-minutes: 55
+        env:
+          CACHE_DIR: ${{ github.workspace }}/${{ env.RUNTIME_CACHE }}
+          OUT_DIR: ${{ github.workspace }}/${{ env.RUNTIME_DIST }}
+          WORK_DIR: ${{ env.RUNTIME_WORK_DIR }}
+          JOBS: "2"
+          NODE_JOBS: "1"
+          NODE_COMPILE_WAVE: "6/6"
+          NODE_COMPILE_REQUIRE_BINARY: "1"
+          PYTHON_BIN: python3
+        run: |
+          set -euo pipefail
+          bash .github/scripts/node-compile-wave.sh
+
+      - name: Package Python launcher, Go runner, and runtime stage
+        if: steps.runtime-build-cache.outputs.cache-hit != 'true'
+        timeout-minutes: 20
+        env:
+          CACHE_DIR: ${{ github.workspace }}/${{ env.RUNTIME_CACHE }}
+          OUT_DIR: ${{ github.workspace }}/${{ env.RUNTIME_DIST }}
+          WORK_DIR: ${{ env.RUNTIME_WORK_DIR }}
+          PYTHON_BIN: python3
+        run: |
+          set -euo pipefail
+          bash runtime-engines/scripts/build-all.sh package
 
       - name: Validate Android runtime bundle
         timeout-minutes: 10
