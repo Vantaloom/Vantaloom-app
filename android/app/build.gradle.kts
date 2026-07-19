@@ -21,7 +21,7 @@ android {
         // CI only overrides versionCode so every APK remains upgradable. Keep
         // versionName tied to the product release instead of inventing a build suffix.
         versionCode = (project.findProperty("versionCode") as String?)?.toIntOrNull() ?: 1
-        versionName = "0.14.34"
+        versionName = "0.14.35"
 
         // The gomobile AAR ships a per-ABI .so; the CI binds android/arm64 only.
         ndk {
