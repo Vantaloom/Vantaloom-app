@@ -75,6 +75,15 @@ android {
         }
     }
 
+    lint {
+        // targetSdk 28 是本项目沙箱刻意的选择（W^X 豁免，见 defaultConfig）。
+        // AGP 的 lintVitalRelease 把 targetSdk<33 当致命错误（面向 Google Play
+        // 的规则），会挡住 assembleRelease；本 APK 走 GitHub Release 自分发、
+        // 不上架 Play，故显式关闭这两条与 targetSdk 版本相关的检查。
+        disable += "ExpiredTargetSdkVersion"
+        disable += "OldTargetApi"
+    }
+
     // The compiled Next.js web export is copied into src/main/assets/ by CI (see
     // build-apk.yml) and served from a vantaloom.localhost origin by
     // WebViewAssetLoader. It is gitignored (42MB, lives in the repo's web/).
