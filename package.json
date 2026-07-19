@@ -1,6 +1,6 @@
 {
   "name": "vantaloom-android",
-  "version": "0.14.32",
+  "version": "0.14.33",
   "private": true,
   "description": "Vantaloom Android client — native Kotlin WebView shell with controller mode, an on-device vantaloom-api runtime, loomnet overlay, and APK-bundled Python, Node.js, and restricted Go engines."
 }

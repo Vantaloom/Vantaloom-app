@@ -81,12 +81,6 @@ object LocalRuntime {
         val launchCapabilityToken = LoopbackAuth.newToken()
         check(launchCapabilityToken != launchBearerToken) { "本地运行时安全令牌生成失败" }
         val nativeLibraryDir = context.applicationInfo.nativeLibraryDir
-        val runtimeBundle = RuntimeEngineAssets.prepare(context)
-        val runtimeManifest = AndroidRuntimeManifest.rebuild(
-            context.filesDir,
-            nativeLibraryDir,
-            runtimeBundle,
-        )
         check(!stopRequested) { "本地运行时启动已取消" }
         purgeStaleLoopbackCredentials(context.cacheDir)
         var credentialsFile: File? = null
@@ -114,8 +108,6 @@ object LocalRuntime {
                     context,
                     launchCredentialsFile,
                     nativeLibraryDir,
-                    runtimeManifest,
-                    runtimeBundle,
                 ),
             )
 
@@ -252,42 +244,33 @@ object LocalRuntime {
         false
     }
 
-    /** Single extension seam for all shell-to-runtime launch capabilities. */
+    /**
+     * Single extension seam for all shell-to-runtime launch capabilities.
+     *
+     * 本地 Linux 沙箱（0.14.33）：agent 的 vantaloom_shell 命令由运行时经 proot
+     * 在一个 Debian 系 rootfs 里执行。壳只负责告诉运行时两个位置——proot 二进制
+     * 所在的 nativeLibraryDir，以及应用私有 files 目录（agent 工作路径身份绑定进
+     * 沙箱）。rootfs 首次使用时由运行时自行下载解压到 files/mobile-runtime/rootfs。
+     */
     private fun runtimeEnvironment(
         context: Context,
         credentialsFile: File,
         nativeLibraryDir: String,
-        runtimeManifest: File,
-        runtimeBundle: RuntimeEngineBundle?,
     ): Map<String, String> = linkedMapOf(
         "HOME" to context.filesDir.absolutePath,
         "TMPDIR" to context.cacheDir.absolutePath,
         "VANTALOOM_DNS" to systemDnsServers(context),
         LoopbackAuth.credentialsFileEnvironmentVariable to credentialsFile.absolutePath,
-        AndroidRuntimeManifest.nativeLibraryDirEnvironment to nativeLibraryDir,
-        AndroidRuntimeManifest.manifestEnvironment to runtimeManifest.absolutePath,
-        AndroidRuntimeManifest.runtimeDataDirEnvironment to File(
-            context.filesDir,
-            "runtime-toolchains/state",
-        ).absolutePath,
-        AndroidRuntimeManifest.appFilesDirEnvironment to context.filesDir.absolutePath,
+        // proot 二进制 = nativeLibraryDir/libproot.so（唯一可 exec 的只读目录）；
+        // Go 侧 mobileruntime 读这两个变量组装 proot 命令。
+        "VANTALOOM_ANDROID_NATIVE_LIB_DIR" to nativeLibraryDir,
+        "VANTALOOM_APP_FILES_DIR" to context.filesDir.absolutePath,
         "VANTALOOM_VERSION" to (
             runCatching {
                 context.packageManager.getPackageInfo(context.packageName, 0).versionName
             }.getOrNull() ?: "android"
         ),
-    ).apply {
-        if (runtimeBundle != null) {
-            put(
-                AndroidRuntimeManifest.runtimeBundleDirEnvironment,
-                runtimeBundle.bundleDir.absolutePath,
-            )
-            put(
-                AndroidRuntimeManifest.packageManifestEnvironment,
-                runtimeBundle.packageManifest.absolutePath,
-            )
-        }
-    }
+    )
 
     internal fun replacePrivateRuntimeEnvironment(
         environment: MutableMap<String, String>,

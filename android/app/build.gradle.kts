@@ -10,11 +10,18 @@ android {
     defaultConfig {
         applicationId = "online.timefiles.vantaloom"
         minSdk = 24
-        targetSdk = 34
+        // targetSdk 28 is load-bearing (0.14.33): Android 10+ (targetSdk 29+)
+        // forbids execve() of files in the app's writable data dir. The on-device
+        // Linux sandbox (proot + a downloaded rootfs) MUST exec rootfs binaries
+        // from writable storage, so — exactly like Termux — we target API 28,
+        // the last level exempt from that W^X restriction. This APK is
+        // self-distributed via GitHub Releases (not Play), so the low targetSdk
+        // is cost-free; it also simplifies notifications/FGS/storage behavior.
+        targetSdk = 28
         // CI only overrides versionCode so every APK remains upgradable. Keep
         // versionName tied to the product release instead of inventing a build suffix.
         versionCode = (project.findProperty("versionCode") as String?)?.toIntOrNull() ?: 1
-        versionName = "0.14.32"
+        versionName = "0.14.33"
 
         // The gomobile AAR ships a per-ABI .so; the CI binds android/arm64 only.
         ndk {
@@ -60,11 +67,10 @@ android {
 
     packaging {
         jniLibs {
-            // 本地运行时（0.14.32）：jniLibs 里的 libvantaloom.so 是完整的
-            // vantaloom-api（纯 Go 可执行文件伪装成 .so），必须解压到
-            // nativeLibraryDir 才能被 ProcessBuilder exec（Android 10+ 禁止从
-            // 可写目录执行）。useLegacyPackaging=true 关闭「从 APK 内直接
-            // mmap」优化、强制解压——这是 exec 型 .so 的标准打法。
+            // jniLibs 里的 libvantaloom.so（完整 vantaloom-api）与 libproot.so
+            // （无 root 的 Linux 沙箱内核）都是伪装成 .so 的可执行文件，必须解压到
+            // nativeLibraryDir 才能被 exec。useLegacyPackaging=true 关闭「从 APK
+            // 内直接 mmap」优化、强制解压——这是 exec 型 .so 的标准打法。
             useLegacyPackaging = true
         }
     }

@@ -6,7 +6,6 @@ on:
     paths:
       - "android/**"
       - "mobile-src/**"
-      - "runtime-engines/**"
       - "web/**"
       - ".github/workflows/build-apk.yml"
       - ".github/scripts/**"
@@ -19,9 +18,10 @@ concurrency:
 jobs:
   build-apk:
     runs-on: ubuntu-latest
-    # Node/V8 arm64 at -j1 needs multiple soft-timeout waves; leave room for
-    # packaging + APK after the runtime engines are built.
-    timeout-minutes: 360
+    # No native language runtimes are compiled anymore (0.14.33): the on-device
+    # Linux sandbox uses a precompiled proot + a rootfs downloaded on first use,
+    # so this job is just gomobile bind + web staging + Gradle + signing.
+    timeout-minutes: 45
     permissions:
       contents: write # tag + create a release and upload the APK as a permanent asset
     env:
@@ -31,10 +31,15 @@ jobs:
       NDK_VER: "26.0.10792818"
       X_MOBILE_VERSION: "v0.0.0-20260709172247-6129f5bee9d5"
       AAR_OUT: android/app/libs/loomnet.aar
-      RUNTIME_CACHE: runtime-engines/.cache
-      RUNTIME_DIST: runtime-engines/dist
-      # Relative to the checkout; stable across all workflow steps.
-      RUNTIME_WORK_DIR: .ci-runtime-work
+      # Precompiled proot sandbox kernel (Termux upstream, pinned by SHA256).
+      # These run the downloaded Linux rootfs without root; see runtime-engines
+      # is gone, sandbox is proot + Ubuntu Base pulled at runtime.
+      PROOT_DEB_URL: "https://packages.termux.dev/apt/termux-main/pool/main/p/proot/proot_5.1.107.85_aarch64.deb"
+      PROOT_DEB_SHA256: "103e210d9e2ddc2b7b18147753dafccc775470ec88204f96a080534b36da261f"
+      TALLOC_DEB_URL: "https://packages.termux.dev/apt/termux-main/pool/main/libt/libtalloc/libtalloc_2.4.3_aarch64.deb"
+      TALLOC_DEB_SHA256: "ac81ad623d74c209718b9f3acb2dd702cc8a88c431e820d212229910b4db29da"
+      SHMEM_DEB_URL: "https://packages.termux.dev/apt/termux-main/pool/main/liba/libandroid-shmem/libandroid-shmem_0.7_aarch64.deb"
+      SHMEM_DEB_SHA256: "0da3a24d558b93c92bcf8d611e0826a99ff96e396b148e6cdf33b47c47c57ff6"
     steps:
       - uses: actions/checkout@v4
 
@@ -50,12 +55,6 @@ jobs:
           go-version: "1.26.x"
           cache-dependency-path: |
             mobile-src/go.sum
-            runtime-engines/go-runner/go.sum
-
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
@@ -68,285 +67,60 @@ jobs:
           echo "ANDROID_NDK_HOME=$NDK_DIR" >> "$GITHUB_ENV"
           echo "ANDROID_NDK_ROOT=$NDK_DIR" >> "$GITHUB_ENV"
 
-      - name: Install native runtime build prerequisites
+      - name: Install packaging prerequisites
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y \
-            build-essential \
-            ca-certificates \
-            file \
-            make \
-            patch \
-            perl \
-            pkg-config \
-            rsync \
-            unzip \
-            xz-utils
+          sudo apt-get install --no-install-recommends -y patchelf unzip
 
-      - name: Record runtime build toolchain versions
-        id: runtime-toolchain
+      - name: Test the WebView bridge contract
+        run: node --test android/app/src/test/js/bridge-shim.test.mjs
+
+      - name: Stage the proot sandbox kernel into jniLibs
         run: |
           set -euo pipefail
-          echo "go=$(go env GOVERSION)" >> "$GITHUB_OUTPUT"
-          echo "python=$(python3 -c 'import platform; print(platform.python_version())')" >> "$GITHUB_OUTPUT"
+          JNI="android/app/src/main/jniLibs/arm64-v8a"
+          mkdir -p "$JNI"
+          WORK="$RUNNER_TEMP/proot-stage"
+          mkdir -p "$WORK"
 
-      - name: Test runtime and WebView bridge contracts
-        run: |
-          set -euo pipefail
-          python3 -m unittest discover -s runtime-engines/tests -p 'test_*.py' -v
-          python3 -m py_compile \
-            runtime-engines/scripts/package_runtime.py \
-            runtime-engines/tests/test_package_runtime.py
-          (cd runtime-engines/go-runner && go test ./...)
-          node --test android/app/src/test/js/bridge-shim.test.mjs
+          fetch_deb() {
+            local url="$1" sha="$2" out="$3"
+            curl -fsSL --retry 3 --retry-delay 2 -o "$out" "$url"
+            echo "$sha  $out" | sha256sum -c -
+          }
+          extract_deb_data() {
+            # deb = ar(debian-binary, control.tar.*, data.tar.*); unpack data.
+            local deb="$1" dest="$2"
+            mkdir -p "$dest"
+            ( cd "$dest" && ar x "$deb" && tar -xf data.tar.* )
+          }
 
-      - name: Cache verified runtime source downloads
-        uses: actions/cache@v4
-        with:
-          path: ${{ env.RUNTIME_CACHE }}
-          key: runtime-sources-v1-${{ runner.os }}-${{ hashFiles('runtime-engines/sources.lock.json') }}
-          restore-keys: |
-            runtime-sources-v1-${{ runner.os }}-
+          fetch_deb "$PROOT_DEB_URL" "$PROOT_DEB_SHA256" "$WORK/proot.deb"
+          fetch_deb "$TALLOC_DEB_URL" "$TALLOC_DEB_SHA256" "$WORK/talloc.deb"
+          fetch_deb "$SHMEM_DEB_URL" "$SHMEM_DEB_SHA256" "$WORK/shmem.deb"
+          extract_deb_data "$WORK/proot.deb" "$WORK/proot"
+          extract_deb_data "$WORK/talloc.deb" "$WORK/talloc"
+          extract_deb_data "$WORK/shmem.deb" "$WORK/shmem"
 
-      - name: Cache compiled Android runtimes
-        id: runtime-build-cache
-        uses: actions/cache@v4
-        with:
-          path: ${{ env.RUNTIME_DIST }}
-          key: runtime-dist-v3-${{ runner.os }}-${{ steps.runtime-toolchain.outputs.go }}-py${{ steps.runtime-toolchain.outputs.python }}-ndk${{ env.NDK_VER }}-${{ hashFiles('runtime-engines/sources.lock.json', 'runtime-engines/scripts/**', 'runtime-engines/src/**', 'runtime-engines/go-runner/**') }}
+          PREFIX="data/data/com.termux/files/usr"
+          cp "$WORK/proot/$PREFIX/bin/proot"               "$JNI/libproot.so"
+          cp "$WORK/proot/$PREFIX/libexec/proot/loader"    "$JNI/libproot_loader.so"
+          cp "$WORK/proot/$PREFIX/libexec/proot/loader32"  "$JNI/libproot_loader32.so"
+          cp "$WORK/talloc/$PREFIX/lib/libtalloc.so.2.4.3" "$JNI/libtalloc.so"
+          cp "$WORK/shmem/$PREFIX/lib/libandroid-shmem.so" "$JNI/libandroid_shmem.so"
+          chmod 0755 "$JNI"/libproot*.so "$JNI"/libtalloc.so "$JNI"/libandroid_shmem.so
 
-      # Empirical CI matrix on ubuntu-latest:
-      #   -j2 bare        → clang frontend exit 139 (OOM)
-      #   -j1 + 12G swap  → survives but exceeds a single 120m step
-      #   -j2 + 16G swap  → still OOM on large V8 TUs
-      # So CI pins NODE_JOBS=1 + 16G swap and splits the compile into soft-timeout
-      # waves that share WORK_DIR. Each wave is its own Actions step so we can
-      # see which segment is slow without killing the whole job on step timeout.
-      - name: Add swap for the Node/V8 cross-build
-        if: steps.runtime-build-cache.outputs.cache-hit != 'true'
-        run: |
-          set -euo pipefail
-          sudo swapoff -a || true
-          sudo rm -f /swapfile
-          sudo fallocate -l 16G /swapfile
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
-          free -h
-          swapon --show
-
-      - name: Prepare runtime sources and Python stage
-        if: steps.runtime-build-cache.outputs.cache-hit != 'true'
-        timeout-minutes: 20
-        env:
-          CACHE_DIR: ${{ github.workspace }}/${{ env.RUNTIME_CACHE }}
-          OUT_DIR: ${{ github.workspace }}/${{ env.RUNTIME_DIST }}
-          WORK_DIR: ${{ env.RUNTIME_WORK_DIR }}
-          PYTHON_BIN: python3
-        run: |
-          set -euo pipefail
-          rm -rf "$OUT_DIR" "$WORK_DIR"
-          mkdir -p "$WORK_DIR"
-          bash runtime-engines/scripts/build-all.sh prepare
-
-      - name: Configure Node for Android arm64
-        if: steps.runtime-build-cache.outputs.cache-hit != 'true'
-        timeout-minutes: 15
-        env:
-          CACHE_DIR: ${{ github.workspace }}/${{ env.RUNTIME_CACHE }}
-          OUT_DIR: ${{ github.workspace }}/${{ env.RUNTIME_DIST }}
-          WORK_DIR: ${{ env.RUNTIME_WORK_DIR }}
-          PYTHON_BIN: python3
-        run: |
-          set -euo pipefail
-          bash runtime-engines/scripts/build-all.sh node-configure
-
-      # Soft-timeout waves: `timeout` stops make cleanly so completed .o files
-      # stay on disk; the next wave resumes. Real compile errors (clang 139, …)
-      # still fail the wave hard and stop the job.
-      - name: Compile Node wave 1/6
-        if: steps.runtime-build-cache.outputs.cache-hit != 'true'
-        id: node-wave-1
-        timeout-minutes: 55
-        env:
-          CACHE_DIR: ${{ github.workspace }}/${{ env.RUNTIME_CACHE }}
-          OUT_DIR: ${{ github.workspace }}/${{ env.RUNTIME_DIST }}
-          WORK_DIR: ${{ env.RUNTIME_WORK_DIR }}
-          JOBS: "2"
-          NODE_JOBS: "1"
-          NODE_COMPILE_WAVE: "1/6"
-          PYTHON_BIN: python3
-        run: |
-          set -euo pipefail
-          bash .github/scripts/node-compile-wave.sh
-
-      - name: Compile Node wave 2/6
-        if: steps.runtime-build-cache.outputs.cache-hit != 'true'
-        id: node-wave-2
-        timeout-minutes: 55
-        env:
-          CACHE_DIR: ${{ github.workspace }}/${{ env.RUNTIME_CACHE }}
-          OUT_DIR: ${{ github.workspace }}/${{ env.RUNTIME_DIST }}
-          WORK_DIR: ${{ env.RUNTIME_WORK_DIR }}
-          JOBS: "2"
-          NODE_JOBS: "1"
-          NODE_COMPILE_WAVE: "2/6"
-          PYTHON_BIN: python3
-        run: |
-          set -euo pipefail
-          bash .github/scripts/node-compile-wave.sh
-
-      - name: Compile Node wave 3/6
-        if: steps.runtime-build-cache.outputs.cache-hit != 'true'
-        id: node-wave-3
-        timeout-minutes: 55
-        env:
-          CACHE_DIR: ${{ github.workspace }}/${{ env.RUNTIME_CACHE }}
-          OUT_DIR: ${{ github.workspace }}/${{ env.RUNTIME_DIST }}
-          WORK_DIR: ${{ env.RUNTIME_WORK_DIR }}
-          JOBS: "2"
-          NODE_JOBS: "1"
-          NODE_COMPILE_WAVE: "3/6"
-          PYTHON_BIN: python3
-        run: |
-          set -euo pipefail
-          bash .github/scripts/node-compile-wave.sh
-
-      - name: Compile Node wave 4/6
-        if: steps.runtime-build-cache.outputs.cache-hit != 'true'
-        id: node-wave-4
-        timeout-minutes: 55
-        env:
-          CACHE_DIR: ${{ github.workspace }}/${{ env.RUNTIME_CACHE }}
-          OUT_DIR: ${{ github.workspace }}/${{ env.RUNTIME_DIST }}
-          WORK_DIR: ${{ env.RUNTIME_WORK_DIR }}
-          JOBS: "2"
-          NODE_JOBS: "1"
-          NODE_COMPILE_WAVE: "4/6"
-          PYTHON_BIN: python3
-        run: |
-          set -euo pipefail
-          bash .github/scripts/node-compile-wave.sh
-
-      - name: Compile Node wave 5/6
-        if: steps.runtime-build-cache.outputs.cache-hit != 'true'
-        id: node-wave-5
-        timeout-minutes: 55
-        env:
-          CACHE_DIR: ${{ github.workspace }}/${{ env.RUNTIME_CACHE }}
-          OUT_DIR: ${{ github.workspace }}/${{ env.RUNTIME_DIST }}
-          WORK_DIR: ${{ env.RUNTIME_WORK_DIR }}
-          JOBS: "2"
-          NODE_JOBS: "1"
-          NODE_COMPILE_WAVE: "5/6"
-          PYTHON_BIN: python3
-        run: |
-          set -euo pipefail
-          bash .github/scripts/node-compile-wave.sh
-
-      - name: Compile Node wave 6/6
-        if: steps.runtime-build-cache.outputs.cache-hit != 'true'
-        id: node-wave-6
-        timeout-minutes: 55
-        env:
-          CACHE_DIR: ${{ github.workspace }}/${{ env.RUNTIME_CACHE }}
-          OUT_DIR: ${{ github.workspace }}/${{ env.RUNTIME_DIST }}
-          WORK_DIR: ${{ env.RUNTIME_WORK_DIR }}
-          JOBS: "2"
-          NODE_JOBS: "1"
-          NODE_COMPILE_WAVE: "6/6"
-          NODE_COMPILE_REQUIRE_BINARY: "1"
-          PYTHON_BIN: python3
-        run: |
-          set -euo pipefail
-          bash .github/scripts/node-compile-wave.sh
-
-      - name: Package Python launcher, Go runner, and runtime stage
-        if: steps.runtime-build-cache.outputs.cache-hit != 'true'
-        timeout-minutes: 20
-        env:
-          CACHE_DIR: ${{ github.workspace }}/${{ env.RUNTIME_CACHE }}
-          OUT_DIR: ${{ github.workspace }}/${{ env.RUNTIME_DIST }}
-          WORK_DIR: ${{ env.RUNTIME_WORK_DIR }}
-          PYTHON_BIN: python3
-        run: |
-          set -euo pipefail
-          bash runtime-engines/scripts/build-all.sh package
-
-      - name: Validate Android runtime bundle
-        timeout-minutes: 10
-        run: |
-          set -euo pipefail
-          DIST="$GITHUB_WORKSPACE/$RUNTIME_DIST"
-          NATIVE="$DIST/jniLibs/arm64-v8a"
-          READELF="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
-
-          test -x "$READELF"
-          test -f "$DIST/runtime-engines.manifest.json"
-          test -f "$DIST/assets/runtime-engines/manifest.json"
-          cmp "$DIST/runtime-engines.manifest.json" "$DIST/assets/runtime-engines/manifest.json"
-
-          for name in python node go; do
-            binary="$NATIVE/libvantaloom_${name}.so"
-            test -f "$binary"
-            "$READELF" -h "$binary" | grep -Eq 'Class:[[:space:]]+ELF64'
-            "$READELF" -h "$binary" | grep -Eq 'Type:[[:space:]]+DYN'
-            "$READELF" -h "$binary" | grep -Eq 'Machine:[[:space:]]+AArch64'
-            "$READELF" -lW "$binary" | grep -q '/system/bin/linker64'
-          done
-
-          native_count=0
-          while IFS= read -r -d '' binary; do
-            native_count=$((native_count + 1))
-            "$READELF" -h "$binary" | grep -Eq 'Class:[[:space:]]+ELF64'
-            "$READELF" -h "$binary" | grep -Eq 'Type:[[:space:]]+DYN'
-            "$READELF" -h "$binary" | grep -Eq 'Machine:[[:space:]]+AArch64'
-            mapfile -t load_alignments < <("$READELF" -lW "$binary" | awk '$1 == "LOAD" { print $NF }')
-            if [ "${#load_alignments[@]}" -eq 0 ]; then
-              echo "ERROR: no LOAD segments found in $binary"
-              exit 1
-            fi
-            for alignment in "${load_alignments[@]}"; do
-              if [[ ! "$alignment" =~ ^0x[0-9A-Fa-f]+$ ]]; then
-                echo "ERROR: invalid LOAD alignment $alignment in $binary"
-                exit 1
-              fi
-              alignment_value=$((alignment))
-              if (( alignment_value < 16384 || alignment_value % 16384 != 0 )); then
-                echo "ERROR: $binary is not 16 KB page aligned (LOAD alignment $alignment)"
-                exit 1
-              fi
-            done
-          done < <(find "$NATIVE" -maxdepth 1 -type f -name '*.so' -print0)
-          if [ "$native_count" -lt 4 ]; then
-            echo "ERROR: runtime native bundle is incomplete ($native_count ELF files)"
-            exit 1
-          fi
-
-          python3 - "$DIST" <<'PY'
-          import json
-          import pathlib
-          import sys
-
-          dist = pathlib.Path(sys.argv[1])
-          assets = dist / "assets" / "runtime-engines"
-          manifest = json.loads((assets / "manifest.json").read_text(encoding="utf-8"))
-          if manifest.get("schemaVersion") != 1:
-              raise SystemExit("runtime manifest schemaVersion must be 1")
-          missing = {"python", "node", "go"} - set(manifest.get("engines", {}))
-          if missing:
-              raise SystemExit(f"runtime manifest is missing engines: {sorted(missing)}")
-          elf_assets = []
-          for path in assets.rglob("*"):
-              if not path.is_file():
-                  continue
-              with path.open("rb") as stream:
-                  if stream.read(4) == b"\x7fELF":
-                      elf_assets.append(path.relative_to(dist).as_posix())
-          if elf_assets:
-              raise SystemExit(f"ELF files are forbidden in runtime assets: {elf_assets}")
-          PY
+          # The Termux proot links its deps by versioned/dashed sonames and an
+          # $PREFIX rpath that does not exist off-Termux. Repoint the DT_NEEDED
+          # to the extractable lib*.so names and search $ORIGIN (nativeLibraryDir);
+          # libc.so is resolved by the system linker. The runtime sets
+          # PROOT_LOADER to the staged loader so proot never needs $PREFIX.
+          patchelf --replace-needed libtalloc.so.2 libtalloc.so "$JNI/libproot.so"
+          patchelf --replace-needed libandroid-shmem.so libandroid_shmem.so "$JNI/libproot.so"
+          patchelf --set-rpath '$ORIGIN' "$JNI/libproot.so"
+          echo "Staged proot sandbox kernel:"
+          ls -la "$JNI"
 
       - name: Install gomobile + gobind
         run: |
@@ -364,7 +138,6 @@ jobs:
           set -euo pipefail
           mkdir -p "$(dirname "$AAR_OUT")"
           pushd mobile-src
-          # The generated bind code depends on the x/mobile bind runtime.
           go get "golang.org/x/mobile/bind@${X_MOBILE_VERSION}"
           gomobile bind \
             -target="${GOMOBILE_TARGET}" \
@@ -388,23 +161,9 @@ jobs:
             exit 1
           fi
           mkdir -p android/app/src/main/assets
-          # Copy the export to the assets root so absolute /_next/... paths resolve
-          # under the vantaloom.localhost origin. Drop the placeholder README.
           rm -f android/app/src/main/assets/README.md
           cp -r web/. android/app/src/main/assets/
           echo "Staged $(find android/app/src/main/assets -type f | wc -l) web files."
-
-      - name: Stage bundled runtimes into the Android app
-        run: |
-          set -euo pipefail
-          DIST="$GITHUB_WORKSPACE/$RUNTIME_DIST"
-          JNI_TARGET="android/app/src/main/jniLibs/arm64-v8a"
-          ASSET_TARGET="android/app/src/main/assets/runtime-engines"
-          mkdir -p "$JNI_TARGET" "$ASSET_TARGET"
-          rsync -a "$DIST/jniLibs/arm64-v8a/" "$JNI_TARGET/"
-          rsync -a --delete "$DIST/assets/runtime-engines/" "$ASSET_TARGET/"
-          echo "Staged $(find "$JNI_TARGET" -maxdepth 1 -type f -name '*.so' | wc -l) native runtime libraries."
-          echo "Staged $(find "$ASSET_TARGET" -type f | wc -l) runtime asset files."
 
       - name: Set up Gradle 8.9
         uses: gradle/actions/setup-gradle@v4
@@ -440,61 +199,25 @@ jobs:
             exit 1
           fi
 
-      - name: Assert bundled runtimes survived APK packaging
+      - name: Assert native binaries survived APK packaging
         run: |
           set -euo pipefail
           APK="android/app/build/outputs/apk/release/app-release-unsigned.apk"
           APK_ENTRIES="$RUNNER_TEMP/vantaloom-apk-entries.txt"
           unzip -Z1 "$APK" > "$APK_ENTRIES"
           for entry in \
-            assets/runtime-engines/manifest.json \
             lib/arm64-v8a/libvantaloom.so \
             lib/arm64-v8a/libgojni.so \
-            lib/arm64-v8a/libvantaloom_python.so \
-            lib/arm64-v8a/libvantaloom_node.so \
-            lib/arm64-v8a/libvantaloom_go.so \
-            lib/arm64-v8a/libpython3.14.so; do
+            lib/arm64-v8a/libproot.so \
+            lib/arm64-v8a/libproot_loader.so \
+            lib/arm64-v8a/libtalloc.so \
+            lib/arm64-v8a/libandroid_shmem.so; do
             if ! grep -Fxq "$entry" "$APK_ENTRIES"; then
-              echo "ERROR: required runtime entry is missing from APK: $entry"
+              echo "ERROR: required native entry is missing from APK: $entry"
               exit 1
             fi
           done
-          python3 - "$APK" <<'PY'
-          import hashlib
-          import json
-          import sys
-          import zipfile
-
-          apk = sys.argv[1]
-          manifest_path = "assets/runtime-engines/manifest.json"
-          with zipfile.ZipFile(apk) as archive:
-              manifest = json.loads(archive.read(manifest_path))
-              missing = {"python", "node", "go"} - set(manifest.get("engines", {}))
-              if manifest.get("schemaVersion") != 1 or missing:
-                  raise SystemExit(
-                      f"invalid runtime manifest in APK; missing={sorted(missing)}"
-                  )
-
-              checked = 0
-              for record in manifest.get("files", []):
-                  path = record.get("path", "")
-                  if not path.startswith("assets/runtime-engines/"):
-                      continue
-                  try:
-                      payload = archive.read(path)
-                  except KeyError as error:
-                      raise SystemExit(
-                          f"manifest-declared runtime asset is missing from APK: {path}"
-                      ) from error
-                  if len(payload) != record.get("size"):
-                      raise SystemExit(f"runtime asset size mismatch in APK: {path}")
-                  if hashlib.sha256(payload).hexdigest() != record.get("sha256"):
-                      raise SystemExit(f"runtime asset hash mismatch in APK: {path}")
-                  checked += 1
-              if checked == 0:
-                  raise SystemExit("runtime manifest declared no packaged data assets")
-              print(f"Verified {checked} manifest-declared runtime assets in APK.")
-          PY
+          echo "All required native binaries are present in the APK."
 
       - name: Sign release APK (keystore from GitHub secrets)
         env:
@@ -552,6 +275,6 @@ jobs:
           gh release create "$TAG" "$APK" \
             --target "$GITHUB_SHA" \
             --title "Vantaloom Android · build ${GITHUB_RUN_NUMBER} (${SHA})" \
-            --notes "Vantaloom 0.14.32 Android local-first client with the native local runtime, loomnet overlay, and bundled Python/Node.js/Go engines. Signed with the stable project release key for in-place upgrades." \
+            --notes "Vantaloom 0.14.33 Android local-first client. The on-device agent shell now runs inside a real Debian-family Linux sandbox (proot + a rootfs downloaded on first use): apt/pip/git/compilers all work. Signed with the stable project release key for in-place upgrades." \
             --latest
           echo "Released $TAG → $(basename "$APK")"
