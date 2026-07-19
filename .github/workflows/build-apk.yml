@@ -33,8 +33,8 @@ jobs:
       AAR_OUT: android/app/libs/loomnet.aar
       RUNTIME_CACHE: runtime-engines/.cache
       RUNTIME_DIST: runtime-engines/dist
-      # Persistent across prepare / configure / compile waves / package.
-      RUNTIME_WORK_DIR: ${{ runner.temp }}/vantaloom-runtime-work
+      # Relative to the checkout; stable across all workflow steps.
+      RUNTIME_WORK_DIR: .ci-runtime-work
     steps:
       - uses: actions/checkout@v4
 
