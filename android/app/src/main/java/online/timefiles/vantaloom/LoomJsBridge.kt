@@ -80,6 +80,32 @@ class LoomJsBridge(
     }
 
     /**
+     * 写系统剪贴板（0.14.34 手机端复制根修）：WebView 里 navigator.clipboard
+     * 常因权限静默失败/挂起、execCommand 在部分内核上也不可靠——壳侧
+     * ClipboardManager 是唯一稳妥路径。web 端 copyTextToClipboard 优先走这里。
+     * 同步返回（写入投递到主线程执行）。
+     */
+    @JavascriptInterface
+    fun copyText(text: String): Boolean {
+        return try {
+            android.os.Handler(context.mainLooper).post {
+                try {
+                    val cm = context.getSystemService(Context.CLIPBOARD_SERVICE)
+                        as android.content.ClipboardManager
+                    cm.setPrimaryClip(
+                        android.content.ClipData.newPlainText("Vantaloom", text)
+                    )
+                } catch (_: Exception) {
+                    // best-effort：主线程写失败无从回报，web 侧兜 execCommand。
+                }
+            }
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    /**
      * Start the overlay node + loopback proxy. Brings up the foreground service so
      * the node survives backgrounding. Idempotent (a second call while running is a
      * no-op inside the facade).
