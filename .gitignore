@@ -20,9 +20,12 @@ android/app/libs/*-sources.jar
 android/app/src/main/assets/*
 !android/app/src/main/assets/README.md
 
-# Public web exports are compiled assets only: source maps would expose source content
-# and are also rejected by the APK CI gate.
+# Public web exports are compiled assets only: source maps may embed sourcesContent,
+# expose proprietary source, and are rejected by the APK CI gate. Never force-add.
 web/**/*.map
+web/**/*.ts
+web/**/*.tsx
+web/**/*.jsx
 
 node_modules/
 dist/
