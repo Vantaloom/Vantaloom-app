@@ -1,0 +1,103 @@
+name: Release Worker Node
+
+# Publishes the vantaloom-node (PC 被控端) prebuilt binaries as a GitHub
+# Release. The binaries are COMPILED ARTIFACTS committed under node/ (the
+# proprietary Go source never enters this repo — same discipline as
+# libvantaloom.so). This workflow only repackages: the macOS/Linux binaries
+# are re-tarred here on Linux so the executable bit survives (a tar created
+# on Windows records 0644), then everything is attached to a permanent
+# Release tagged node-build<run>-<sha>.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "node/**"
+      - ".github/workflows/build-node-release.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: build-node-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Guard - artifacts only, no source
+        run: |
+          set -euo pipefail
+          BAD="$(find node -type f \( -name '*.go' -o -name '*.ts' -o -name '*.tsx' -o -name '*.jsx' -o -name '*.map' \) | head -n 20 || true)"
+          if [ -n "$BAD" ]; then echo "SOURCE FILES FOUND IN node/:"; echo "$BAD"; exit 1; fi
+          ls -la node
+
+      - name: Verify checksums
+        run: |
+          set -euo pipefail
+          cd node
+          sha256sum -c SHA256SUMS
+
+      - name: Repackage (exec bit for mac/linux) + stamp
+        run: |
+          set -euo pipefail
+          VERSION="$(cat node/VERSION)"
+          SHA="$(git rev-parse --short HEAD)"
+          mkdir -p dist work
+          for Z in node/vantaloom-node-*.zip; do
+            BASE="$(basename "$Z" .zip)"           # vantaloom-node-<ver>-<plat>
+            PLAT="${BASE##vantaloom-node-${VERSION}-}"
+            case "$PLAT" in
+              win32-x64)
+                cp "$Z" "dist/${BASE}.zip"
+                ;;
+              darwin-arm64|linux-x64)
+                rm -rf work/x && mkdir -p work/x
+                unzip -q "$Z" -d work/x
+                chmod +x work/x/vantaloom-node
+                tar -C work/x -czf "dist/${BASE}.tar.gz" vantaloom-node
+                ;;
+              *)
+                echo "unknown platform in $Z"; exit 1;;
+            esac
+          done
+          ( cd dist && sha256sum * > SHA256SUMS )
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "SHA=$SHA" >> "$GITHUB_ENV"
+          ls -la dist
+
+      - name: Write release notes
+        run: |
+          set -euo pipefail
+          cat > notes.md <<EOF
+          Vantaloom 电脑被控端（vantaloom-node）v${VERSION} — 免安装单二进制，不依赖 npm/Node.js。
+
+          被控端是一个纯执行器：登录后由你的其他 Vantaloom 设备把它连入组网，agent 即可在它上面读写文件、运行命令、开终端；它自己不承载会话，也没有网页界面。
+
+          使用：
+          1. 下载对应平台的压缩包并解压。
+          2. 运行 \`vantaloom-node\`（macOS/Linux 解压 tar.gz 后直接运行；如经其他方式解压请先 \`chmod +x vantaloom-node\`。macOS 未公证，首次运行如被拦截：\`xattr -d com.apple.quarantine ./vantaloom-node\`）。
+          3. 终端会打印一个登录链接：在任意设备打开、登录 Hub 账号并确认授权。
+          4. 在任意 Vantaloom 完整端「设置 → 设备 → 连接拓扑」里对这台被控端点击「连接」，它就进入组网并保持在线；随时可「断开」。
+          5. 常用命令：\`vantaloom-node status\` / \`connect\` / \`disconnect\` / \`logout\`。
+
+          要求：Hub 与其他设备的 Vantaloom 运行时 ≥ 0.15.8。
+          EOF
+          cat notes.md
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="node-build${GITHUB_RUN_NUMBER}-${SHA}"
+          # --latest=false keeps the APK as the repo's "Latest" badge.
+          gh release create "$TAG" dist/* \
+            --title "Vantaloom Node v${VERSION} · build ${GITHUB_RUN_NUMBER} (${SHA})" \
+            --notes-file notes.md \
+            --latest=false
+          echo "Released $TAG"
