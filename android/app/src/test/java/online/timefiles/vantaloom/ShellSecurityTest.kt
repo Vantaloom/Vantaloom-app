@@ -64,6 +64,33 @@ class ShellSecurityTest {
     }
 
     @Test
+    fun bridgeSecretIsFull256BitsAndRotates() {
+        val first = ShellSecurity.newBridgeSecret()
+        val second = ShellSecurity.newBridgeSecret()
+        assertEquals(64, first.length)
+        assertTrue(first.matches(Regex("[0-9a-f]{64}")))
+        assertNotEquals(first, second)
+    }
+
+    @Test
+    fun previewSubframesAllowOnlyLoopbackAndPrivateLan() {
+        // Loopback / private-LAN previews load in-app.
+        assertTrue(ShellSecurity.isPreviewableSubframeUrl("http://127.0.0.1:8765/"))
+        assertTrue(ShellSecurity.isPreviewableSubframeUrl("http://localhost:3000/app"))
+        assertTrue(ShellSecurity.isPreviewableSubframeUrl("https://192.168.1.20:5173/"))
+        assertTrue(ShellSecurity.isPreviewableSubframeUrl("http://10.0.0.5/"))
+        assertTrue(ShellSecurity.isPreviewableSubframeUrl("http://172.16.5.5:8080/"))
+
+        // Public hosts, non-http schemes and credentialed URLs stay blocked.
+        assertFalse(ShellSecurity.isPreviewableSubframeUrl("https://example.com/"))
+        assertFalse(ShellSecurity.isPreviewableSubframeUrl("http://8.8.8.8/"))
+        assertFalse(ShellSecurity.isPreviewableSubframeUrl("http://172.32.0.1/"))
+        assertFalse(ShellSecurity.isPreviewableSubframeUrl("javascript:alert(1)"))
+        assertFalse(ShellSecurity.isPreviewableSubframeUrl("http://user@127.0.0.1:8765/"))
+        assertFalse(ShellSecurity.isPreviewableSubframeUrl(null))
+    }
+
+    @Test
     fun loopbackTokensCarryFull256BitsAndRotate() {
         val first = LoopbackAuth.newToken()
         val second = LoopbackAuth.newToken()

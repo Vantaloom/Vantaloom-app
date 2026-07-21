@@ -56,6 +56,11 @@ class MainActivity : Activity() {
     private lateinit var webView: WebView
     private lateinit var bridge: LoomJsBridge
 
+    // Per-launch secret gating the privileged native methods. Templated only into
+    // the origin-scoped bridge shim (app frame), so a preview iframe cannot obtain
+    // it. Regenerated every launch — never persisted.
+    private val bridgeSecret: String = ShellSecurity.newBridgeSecret()
+
     // In-flight image pick (composer 加号键). One at a time; the classic
     // startActivityForResult flow is used because this Activity is a bare
     // android.app.Activity (no androidx.activity Result API available).
@@ -136,9 +141,14 @@ class MainActivity : Activity() {
             ): Boolean {
                 val raw = request.url.toString()
                 if (ShellSecurity.isTrustedAppUrl(raw)) return false
-                // The privileged bridge must never accompany an external document,
-                // including an untrusted iframe. Main-frame links are handed to a
-                // separate app; subframe navigations fail closed.
+                // A loopback / private-LAN document loaded in a SUBFRAME is an
+                // in-app preview (dev server / design preview): let it load. It
+                // runs in its own origin, so it never receives the bridge shim and
+                // its window.__loomNative is neutered by the guard script.
+                if (!request.isForMainFrame && ShellSecurity.isPreviewableSubframeUrl(raw)) return false
+                // The privileged bridge must never accompany an external document.
+                // Main-frame links are handed to a separate app; other subframe
+                // navigations fail closed.
                 if (request.isForMainFrame) openExternalNavigation(raw)
                 return true
             }
@@ -149,6 +159,12 @@ class MainActivity : Activity() {
             ): WebResourceResponse? {
                 if (ShellSecurity.isTrustedAppUrl(request.url.toString())) {
                     return assetLoader.shouldInterceptRequest(request.url)
+                }
+                // Allow a loopback / private-LAN preview subframe to load from the
+                // network (mirrors shouldOverrideUrlLoading; some WebView versions
+                // route subframe loads through here instead).
+                if (!request.isForMainFrame && ShellSecurity.isPreviewableSubframeUrl(request.url.toString())) {
+                    return null
                 }
                 // Some WebView versions do not consistently invoke
                 // shouldOverrideUrlLoading for subframes. Block navigation-shaped
@@ -174,8 +190,10 @@ class MainActivity : Activity() {
                     return
                 }
                 // Fallback injection for WebViews without DOCUMENT_START_SCRIPT.
+                // onPageStarted fires for the main (trusted app) frame only, so the
+                // secret-carrying shim is not injected into preview subframes.
                 if (!WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
-                    view.evaluateJavascript(BRIDGE_SHIM, null)
+                    view.evaluateJavascript(bridgeShim(bridgeSecret), null)
                 }
             }
         }
@@ -185,6 +203,7 @@ class MainActivity : Activity() {
         bridge = LoomJsBridge(
             applicationContext,
             evalJs = { js -> webView.post { webView.evaluateJavascript(js, null) } },
+            bridgeSecret = bridgeSecret,
             onChrome = { color, dark -> applyChrome(color, dark) },
             onPickImages = { callId, source ->
                 runOnUiThread { launchImagePick(callId, source) }
@@ -201,9 +220,20 @@ class MainActivity : Activity() {
         // Guaranteed-early injection so window.__loomBridge exists before any page
         // script runs (preferred over onPageStarted).
         if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
+            // Defense-in-depth: in EVERY non-app frame (e.g. a loopback preview
+            // iframe) neuter window.__loomNative at document start, before any page
+            // script runs. The app frame is left untouched (guard early-returns).
+            // Registered first so it runs before the shim in the app frame. Wrapped
+            // so an unexpected origin-rule rejection can never crash launch — the
+            // per-method secret gate is the primary protection regardless.
+            runCatching {
+                WebViewCompat.addDocumentStartJavaScript(webView, BRIDGE_GUARD, setOf("*"))
+            }
+            // The privileged shim, carrying the launch secret, is injected ONLY into
+            // the trusted app origin — never into a preview subframe.
             WebViewCompat.addDocumentStartJavaScript(
                 webView,
-                BRIDGE_SHIM,
+                bridgeShim(bridgeSecret),
                 setOf(ShellSecurity.documentStartOriginRule),
             )
         }
@@ -523,11 +553,41 @@ class MainActivity : Activity() {
          * own registry + a (callId, ok, payload) resolver the web side clobbered),
          * so every async call timed out while native had actually succeeded.
          */
-        private val BRIDGE_SHIM = """
+        /**
+         * The privileged bridge shim, parameterized with the per-launch secret so
+         * only this (origin-scoped) copy can call the gated native methods. The
+         * placeholder is a fixed hex-shaped token replaced at injection time; a
+         * preview iframe never receives this script and so never learns the secret.
+         */
+        fun bridgeShim(secret: String): String = BRIDGE_SHIM_TEMPLATE.replace(BRIDGE_SECRET_PLACEHOLDER, secret)
+
+        private const val BRIDGE_SECRET_PLACEHOLDER = "__LOOM_BRIDGE_SECRET__"
+
+        /**
+         * Runs at document start in EVERY non-app frame (allowed-origin rule "*"):
+         * removes the privileged native interface so a previewed loopback document
+         * cannot reach node identity / capabilities. The app frame returns early.
+         * Defense-in-depth behind the per-method secret gate.
+         */
+        private val BRIDGE_GUARD = """
+(function () {
+  try {
+    if (window.location && window.location.origin === "http://vantaloom.localhost") return;
+  } catch (e) {}
+  try {
+    Object.defineProperty(window, "__loomNative", { value: undefined, configurable: false, writable: false });
+  } catch (e) {
+    try { window.__loomNative = undefined; } catch (e2) {}
+  }
+})();
+""".trimIndent()
+
+        private val BRIDGE_SHIM_TEMPLATE = """
 (function () {
   if (window.__loomBridge) return;
   var N = window.__loomNative;
   if (!N) return;
+  var __loomSecret = "${BRIDGE_SECRET_PLACEHOLDER}";
   var localRuntimeAuth = null;
 
   function normalizedHttpOrigin(raw) {
@@ -548,7 +608,7 @@ class MainActivity : Activity() {
   function authenticatedStreamUrl(raw) {
     if (!isLocalRuntimeUrl(raw)) return raw;
     try {
-      var signed = N.authorizeLocalRuntimeUrl(String(raw));
+      var signed = N.authorizeLocalRuntimeUrl(__loomSecret, String(raw));
       return signed ? String(signed) : raw;
     } catch (_) {
       return raw;
@@ -603,7 +663,7 @@ class MainActivity : Activity() {
   // calling startLocalRuntime again. Ask native to re-install the still-live
   // process capability into this new document; no token is returned to callers.
   try {
-    if (typeof N.restoreLocalRuntimeAuth === "function") N.restoreLocalRuntimeAuth();
+    if (typeof N.restoreLocalRuntimeAuth === "function") N.restoreLocalRuntimeAuth(__loomSecret);
   } catch (_) {}
 
   if (!window.__loomRuntimeAuthPatched) {
@@ -693,14 +753,14 @@ class MainActivity : Activity() {
     deviceId: function () { return N.deviceId(); },
     loopbackPort: function () { return N.loopbackPort(); },
     statusJSON: function () { return N.statusJSON(); },
-    setToken: function (t) { N.setToken(t); },
+    setToken: function (t) { N.setToken(__loomSecret, t); },
     setChrome: function (c, d) { N.setChrome(String(c || ""), !!d); },
     startNode: function (hubBaseUrl, hubToken, machineId, callbackId) {
-      N.startNode(callbackId, hubBaseUrl, hubToken, machineId || "");
+      N.startNode(__loomSecret, callbackId, hubBaseUrl, hubToken, machineId || "");
     },
-    connect: function (machineId, callbackId) { N.connect(callbackId, machineId); },
-    disconnect: function (callbackId) { N.disconnect(callbackId); },
-    stop: function (callbackId) { N.stopNode(callbackId); },
+    connect: function (machineId, callbackId) { N.connect(__loomSecret, callbackId, machineId); },
+    disconnect: function (callbackId) { N.disconnect(__loomSecret, callbackId); },
+    stop: function (callbackId) { N.stopNode(__loomSecret, callbackId); },
     pickImages: function (source, callbackId) {
       N.pickImages(callbackId, String(source || "gallery"));
     },
@@ -709,8 +769,8 @@ class MainActivity : Activity() {
     shareFile: function (path, name, callbackId) {
       N.shareFile(callbackId, String(path || ""), String(name || ""));
     },
-    startLocalRuntime: function (callbackId) { N.startLocalRuntime(callbackId); },
-    stopLocalRuntime: function (callbackId) { N.stopLocalRuntime(callbackId); }
+    startLocalRuntime: function (callbackId) { N.startLocalRuntime(__loomSecret, callbackId); },
+    stopLocalRuntime: function (callbackId) { N.stopLocalRuntime(__loomSecret, callbackId); }
   };
 })();
 """.trimIndent()

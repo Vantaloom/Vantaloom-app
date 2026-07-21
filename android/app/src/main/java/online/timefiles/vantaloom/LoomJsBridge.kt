@@ -38,6 +38,13 @@ import java.util.concurrent.Executors
 class LoomJsBridge(
     private val context: Context,
     private val evalJs: (String) -> Unit,
+    /**
+     * Per-launch secret gating the identity/capability methods. The origin-scoped
+     * bridge shim (app frame only) presents it; an untrusted preview iframe that
+     * shares window.__loomNative cannot (it never received the shim). Empty ⇒
+     * gating disabled (should never happen in normal launch).
+     */
+    private val bridgeSecret: String = "",
     /** 系统栏配色回调（web 主题 → MainActivity.applyChrome）。 */
     private val onChrome: (color: String, dark: Boolean) -> Unit = { _, _ -> },
     /** 图片选择回调（composer 加号 → MainActivity 拉起相机/相册）。 */
@@ -48,6 +55,21 @@ class LoomJsBridge(
     private val onPickFolder: (callId: String) -> Unit = { _ -> },
 ) {
     private val worker = Executors.newSingleThreadExecutor()
+
+    /**
+     * Constant-time check that a privileged call carries the launch secret. An
+     * untrusted preview frame never receives the shim (origin-scoped) and so
+     * cannot present it; such calls are refused. Empty configured secret means
+     * gating was not wired — allow, to avoid bricking a misconfigured build.
+     */
+    private fun authorized(secret: String?): Boolean {
+        if (bridgeSecret.isEmpty()) return true
+        val provided = secret ?: return false
+        return java.security.MessageDigest.isEqual(
+            provided.toByteArray(Charsets.UTF_8),
+            bridgeSecret.toByteArray(Charsets.UTF_8),
+        )
+    }
 
     @JavascriptInterface
     fun isNative(): Boolean = true
@@ -66,7 +88,8 @@ class LoomJsBridge(
 
     /** Rotate the Hub JWT used by the mini Hub client + signaling WS. */
     @JavascriptInterface
-    fun setToken(token: String) {
+    fun setToken(secret: String, token: String) {
+        if (!authorized(secret)) return
         Loom.get()?.setToken(token)
     }
 
@@ -111,7 +134,11 @@ class LoomJsBridge(
      * no-op inside the facade).
      */
     @JavascriptInterface
-    fun startNode(callId: String, hubBaseUrl: String, hubToken: String, machineId: String) {
+    fun startNode(secret: String, callId: String, hubBaseUrl: String, hubToken: String, machineId: String) {
+        if (!authorized(secret)) {
+            reject(callId, "unauthorized")
+            return
+        }
         worker.execute {
             try {
                 LoomForegroundService.start(context)
@@ -131,7 +158,11 @@ class LoomJsBridge(
      * local-API calls at (setRuntimeTarget).
      */
     @JavascriptInterface
-    fun connect(callId: String, machineId: String) {
+    fun connect(secret: String, callId: String, machineId: String) {
+        if (!authorized(secret)) {
+            reject(callId, "unauthorized")
+            return
+        }
         worker.execute {
             try {
                 val b = Loom.get() ?: throw IllegalStateException("node not started")
@@ -147,7 +178,11 @@ class LoomJsBridge(
 
     /** Clear the loopback target; the node + cached sessions stay up. */
     @JavascriptInterface
-    fun disconnect(callId: String) {
+    fun disconnect(secret: String, callId: String) {
+        if (!authorized(secret)) {
+            reject(callId, "unauthorized")
+            return
+        }
         worker.execute {
             try {
                 Loom.get()?.disconnect()
@@ -264,7 +299,11 @@ class LoomJsBridge(
      * 组网节点共用用户可停止的 specialUse 会话。幂等——已在跑直接返回。
      */
     @JavascriptInterface
-    fun startLocalRuntime(callId: String) {
+    fun startLocalRuntime(secret: String, callId: String) {
+        if (!authorized(secret)) {
+            reject(callId, "unauthorized")
+            return
+        }
         worker.execute {
             try {
                 LoomForegroundService.start(context)
@@ -280,7 +319,11 @@ class LoomJsBridge(
 
     /** Stop the packaged runtime after its persisted Hub identity is cleared. */
     @JavascriptInterface
-    fun stopLocalRuntime(callId: String) {
+    fun stopLocalRuntime(secret: String, callId: String) {
+        if (!authorized(secret)) {
+            reject(callId, "unauthorized")
+            return
+        }
         worker.execute {
             try {
                 LocalRuntime.stop()
@@ -296,13 +339,17 @@ class LoomJsBridge(
 
     /** Reinstall the live child runtime auth into a newly loaded WebView document. */
     @JavascriptInterface
-    fun restoreLocalRuntimeAuth() {
+    fun restoreLocalRuntimeAuth(secret: String) {
+        if (!authorized(secret)) return
         LocalRuntime.currentEndpoint()?.let(::installLocalRuntimeAuth)
     }
 
     /** Sign a current-runtime resource/stream URL without exposing the capability key. */
     @JavascriptInterface
-    fun authorizeLocalRuntimeUrl(raw: String): String = LocalRuntime.authorizeLocalRuntimeUrl(raw)
+    fun authorizeLocalRuntimeUrl(secret: String, raw: String): String {
+        if (!authorized(secret)) return raw
+        return LocalRuntime.authorizeLocalRuntimeUrl(raw)
+    }
 
     /** Shell-side promise fulfilment (MainActivity 的选择流程用)。 */
     internal fun resolveFromShell(callId: String, payloadJson: String) = resolve(callId, payloadJson)
@@ -504,7 +551,11 @@ class LoomJsBridge(
 
     /** Tear the node down and stop the foreground service. */
     @JavascriptInterface
-    fun stopNode(callId: String) {
+    fun stopNode(secret: String, callId: String) {
+        if (!authorized(secret)) {
+            reject(callId, "unauthorized")
+            return
+        }
         worker.execute {
             try {
                 Loom.stop()

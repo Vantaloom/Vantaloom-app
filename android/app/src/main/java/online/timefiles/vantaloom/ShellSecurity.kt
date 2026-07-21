@@ -14,6 +14,7 @@ internal object ShellSecurity {
     const val documentStartOriginRule = appOrigin
 
     private val externallyHandledSchemes = setOf("http", "https", "mailto", "tel")
+    private val secureRandom = SecureRandom()
 
     fun isTrustedAppUrl(raw: String?): Boolean {
         if (raw.isNullOrBlank()) return false
@@ -28,6 +29,59 @@ internal object ShellSecurity {
         if (raw.isNullOrBlank()) return false
         val scheme = runCatching { URI(raw).scheme?.lowercase() }.getOrNull() ?: return false
         return scheme in externallyHandledSchemes
+    }
+
+    /**
+     * A per-launch secret gating the privileged native bridge methods. It is
+     * templated ONLY into the origin-scoped bridge shim (which is injected into
+     * the app frame alone), so an untrusted preview iframe — which shares the raw
+     * window.__loomNative object but never receives the shim — cannot supply it.
+     * The native side rejects identity/capability calls that don't present it.
+     */
+    fun newBridgeSecret(): String {
+        val bytes = ByteArray(32)
+        secureRandom.nextBytes(bytes)
+        val hex = CharArray(bytes.size * 2)
+        val digits = "0123456789abcdef"
+        bytes.forEachIndexed { index, value ->
+            val unsigned = value.toInt() and 0xff
+            hex[index * 2] = digits[unsigned ushr 4]
+            hex[index * 2 + 1] = digits[unsigned and 0x0f]
+        }
+        bytes.fill(0)
+        return String(hex)
+    }
+
+    /**
+     * True for a SUBFRAME (iframe) URL the shell may load in-place for a preview:
+     * a loopback or private-LAN http(s) document — the local runtime, an agent
+     * dev server, or a design-preview proxy. Everything else (a real website,
+     * javascript:/data:/intent: URLs) is still externalized / blocked. A previewed
+     * document runs in its own (non-app) origin, so it never receives the bridge
+     * shim and its access to window.__loomNative is neutered by the guard script.
+     */
+    fun isPreviewableSubframeUrl(raw: String?): Boolean {
+        if (raw.isNullOrBlank()) return false
+        val uri = runCatching { URI(raw) }.getOrNull() ?: return false
+        val scheme = uri.scheme?.lowercase() ?: return false
+        if (scheme != "http" && scheme != "https") return false
+        if (uri.userInfo != null) return false
+        val host = uri.host?.lowercase() ?: return false
+        return isLoopbackOrPrivateHost(host)
+    }
+
+    private fun isLoopbackOrPrivateHost(host: String): Boolean {
+        if (host == "localhost" || host == "::1" || host == "[::1]") return true
+        val octets = host.split('.')
+        if (octets.size == 4 && octets.all { it.toIntOrNull() in 0..255 }) {
+            val a = octets[0].toInt()
+            val b = octets[1].toInt()
+            if (a == 127) return true // 127.0.0.0/8 loopback
+            if (a == 10) return true // 10.0.0.0/8
+            if (a == 192 && b == 168) return true // 192.168.0.0/16
+            if (a == 172 && b in 16..31) return true // 172.16.0.0/12
+        }
+        return false
     }
 
     fun isDocumentNavigation(isMainFrame: Boolean, headers: Map<String, String>): Boolean {
