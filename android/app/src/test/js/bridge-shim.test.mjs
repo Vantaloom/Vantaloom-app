@@ -7,22 +7,26 @@ import { fileURLToPath } from "node:url"
 const bearerToken = "a".repeat(64)
 const capabilityKey = "b".repeat(64)
 const capabilityExpiration = "2000043200"
+// The per-launch secret gating the privileged native methods: the origin-scoped
+// shim (this copy) presents it on every gated call. Mirror bridgeShim()'s
+// placeholder substitution so the extracted shim carries a concrete secret.
+const bridgeSecret = "f".repeat(64)
 const sourcePath = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "../../main/java/online/timefiles/vantaloom/MainActivity.kt"
 )
 const source = fs.readFileSync(sourcePath, "utf8")
 const match = source.match(
-  /private val BRIDGE_SHIM = """\r?\n(?<js>[\s\S]*?)\r?\n"""\.trimIndent\(\)/
+  /private val BRIDGE_SHIM_TEMPLATE = """\r?\n(?<js>[\s\S]*?)\r?\n"""\.trimIndent\(\)/
 )
-assert.ok(match?.groups?.js, "BRIDGE_SHIM not found")
+assert.ok(match?.groups?.js, "BRIDGE_SHIM_TEMPLATE not found")
 const shim = match.groups.js.replaceAll(
   "${LoopbackAuth.queryParameter}",
   "__vantaloom_loopback_token"
 ).replaceAll(
   "${LoopbackAuth.expirationQueryParameter}",
   "__vantaloom_loopback_exp"
-)
+).replaceAll("${BRIDGE_SECRET_PLACEHOLDER}", bridgeSecret)
 
 const calls = {
   authorize: [],
@@ -47,7 +51,10 @@ window.__loomNative = {
   deviceId: () => "android-test",
   loopbackPort: () => 0,
   statusJSON: () => '{"state":"idle"}',
-  setToken() {},
+  // Gated methods take the launch secret as the leading argument.
+  setToken(secret) {
+    calls.setTokenSecret = secret
+  },
   setChrome() {},
   startNode() {},
   connect() {},
@@ -59,7 +66,8 @@ window.__loomNative = {
   shareFile() {},
   startLocalRuntime() {},
   stopLocalRuntime() {},
-  authorizeLocalRuntimeUrl(raw) {
+  authorizeLocalRuntimeUrl(secret, raw) {
+    calls.authorizeSecret = secret
     const original = String(raw)
     const url = new URL(original)
     if (
@@ -84,8 +92,9 @@ window.__loomNative = {
     calls.authorize.push({ original, requestTarget, signed, signature })
     return signed
   },
-  restoreLocalRuntimeAuth() {
+  restoreLocalRuntimeAuth(secret) {
     calls.restore += 1
+    calls.restoreSecret = secret
     const args = ["http://127.0.0.1:8780", bearerToken]
     calls.restoreArgs.push(args)
     window.__loomInstallLocalRuntimeAuth(...args)
@@ -148,6 +157,10 @@ new WebSocket("ws://127.0.0.1:8780/v1/ws")
 window.open("https://example.com/preview")
 window.open("javascript:alert(1)")
 
+// The shim must present the launch secret on gated native calls; a preview
+// iframe (which never receives this shim) cannot, so its calls are refused.
+assert.equal(calls.restoreSecret, bridgeSecret, "restore did not carry the bridge secret")
+assert.equal(calls.authorizeSecret, bridgeSecret, "authorize did not carry the bridge secret")
 assert.deepEqual(calls.restoreArgs, [["http://127.0.0.1:8780", bearerToken]])
 assert.equal(calls.fetch[0].authorization, `Bearer ${bearerToken}`)
 assert.equal(calls.fetch[1].authorization, null, "resource fetch carried dual auth")

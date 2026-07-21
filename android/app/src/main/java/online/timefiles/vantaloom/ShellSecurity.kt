@@ -72,10 +72,10 @@ internal object ShellSecurity {
 
     private fun isLoopbackOrPrivateHost(host: String): Boolean {
         if (host == "localhost" || host == "::1" || host == "[::1]") return true
-        val octets = host.split('.')
-        if (octets.size == 4 && octets.all { it.toIntOrNull() in 0..255 }) {
-            val a = octets[0].toInt()
-            val b = octets[1].toInt()
+        val octets = host.split('.').map { it.toIntOrNull() }
+        if (octets.size == 4 && octets.all { it != null && it in 0..255 }) {
+            val a = octets[0]!!
+            val b = octets[1]!!
             if (a == 127) return true // 127.0.0.0/8 loopback
             if (a == 10) return true // 10.0.0.0/8
             if (a == 192 && b == 168) return true // 192.168.0.0/16
