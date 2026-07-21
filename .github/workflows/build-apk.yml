@@ -34,8 +34,14 @@ jobs:
       # Precompiled proot sandbox kernel (Termux upstream, pinned by SHA256).
       # These run the downloaded Linux rootfs without root; see runtime-engines
       # is gone, sandbox is proot + Ubuntu Base pulled at runtime.
-      PROOT_DEB_URL: "https://packages.termux.dev/apt/termux-main/pool/main/p/proot/proot_5.1.107.85_aarch64.deb"
-      PROOT_DEB_SHA256: "103e210d9e2ddc2b7b18147753dafccc775470ec88204f96a080534b36da261f"
+      # NOTE: the Termux pool keeps ONLY the newest build of each package — a
+      # proot version bump upstream 404s the pinned URL and this job fails loud
+      # (2026-07-21: .85 → .86). Re-pin: list
+      # https://packages.termux.dev/apt/termux-main/pool/main/p/proot/ , download,
+      # sha256sum, verify the data.tar layout still has bin/proot + libexec/proot/
+      # loader{,32}, then update BOTH values below.
+      PROOT_DEB_URL: "https://packages.termux.dev/apt/termux-main/pool/main/p/proot/proot_5.1.107.86_aarch64.deb"
+      PROOT_DEB_SHA256: "d436cef349b14df0cde18dffe105e64cade3638b3193d870e8f748fde489ded1"
       TALLOC_DEB_URL: "https://packages.termux.dev/apt/termux-main/pool/main/libt/libtalloc/libtalloc_2.4.3_aarch64.deb"
       TALLOC_DEB_SHA256: "ac81ad623d74c209718b9f3acb2dd702cc8a88c431e820d212229910b4db29da"
       SHMEM_DEB_URL: "https://packages.termux.dev/apt/termux-main/pool/main/liba/libandroid-shmem/libandroid-shmem_0.7_aarch64.deb"
