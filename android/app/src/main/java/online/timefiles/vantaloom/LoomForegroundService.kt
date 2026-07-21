@@ -8,10 +8,12 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -30,16 +32,27 @@ class LoomForegroundService : Service() {
 
     private val stopInProgress = AtomicBoolean(false)
     private val mainHandler = Handler(Looper.getMainLooper())
+    private var wakeLock: PowerManager.WakeLock? = null
+    private var wifiLock: WifiManager.WifiLock? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    override fun onCreate() {
+        super.onCreate()
+        instance = this
+    }
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        when (intent?.action) {
+        val action = intent?.action
+        when (action) {
             ACTION_STOP -> {
                 requestStop(startId)
                 return START_NOT_STICKY
             }
-            ACTION_START -> Unit
+            // ACTION_START = an explicit bridge start; ACTION_RELAUNCH = boot /
+            // app-update autostart; null = a sticky restart (the OS re-delivered
+            // onStartCommand with no intent after reclaiming the process).
+            ACTION_START, ACTION_RELAUNCH, null -> Unit
             else -> {
                 stopSelfResult(startId)
                 return START_NOT_STICKY
@@ -53,15 +66,80 @@ class LoomForegroundService : Service() {
         } else {
             startForeground(NOTIF_ID, notification)
         }
-        return START_NOT_STICKY
+        acquireWakeLock()
+
+        // Boot / sticky restart: bring the runtime back up if the user intended it
+        // to be running. A normal ACTION_START does NOT relaunch here — the bridge
+        // that sent it also calls LocalRuntime.ensureStarted (idempotent).
+        if ((action == ACTION_RELAUNCH || action == null) &&
+            RuntimePrefs.shouldRun(this) && !LocalRuntime.isRunning()
+        ) {
+            Thread {
+                runCatching { LocalRuntime.ensureStarted(applicationContext) }
+            }.apply { isDaemon = true; name = "vantaloom-runtime-relaunch" }.start()
+        }
+
+        // Keep-alive (default on): ask the OS to restart us after a low-memory kill.
+        return if (RuntimePrefs.keepAlive(this)) START_STICKY else START_NOT_STICKY
+    }
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        // Termux-style: swiping the app from Recents must NOT kill a runtime the
+        // user asked to keep running. Only stop when keep-alive is off or nothing
+        // was intentionally running.
+        if (!(RuntimePrefs.keepAlive(this) && RuntimePrefs.shouldRun(this))) {
+            stopAllWork()
+            stopSelf()
+        }
+        super.onTaskRemoved(rootIntent)
     }
 
     override fun onDestroy() {
-        // Never leave runtime work alive without its user-visible foreground
-        // notification. A later explicit bridge call can start a fresh session.
-        LocalRuntime.requestStop()
-        runCatching { Loom.stop() }
+        releaseWakeLock()
+        instance = null
+        // With keep-alive the OS restarts the service (START_STICKY) and the
+        // null-intent path relaunches the child — so on a surprise destroy while
+        // the user still wants it running, DON'T tear the runtime down (that would
+        // be the very interruption keep-alive exists to prevent). Only clean up on
+        // a genuine stop, where shouldRun has already been cleared.
+        if (!RuntimePrefs.shouldRun(this)) {
+            LocalRuntime.requestStop()
+            runCatching { Loom.stop() }
+        }
         super.onDestroy()
+    }
+
+    @Suppress("DEPRECATION")
+    private fun acquireWakeLock() {
+        if (!RuntimePrefs.wakeLock(this)) return
+        if (wakeLock?.isHeld != true) {
+            val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+            wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "vantaloom:runtime").apply {
+                setReferenceCounted(false)
+                runCatching { acquire() }
+            }
+        }
+        if (wifiLock?.isHeld != true) {
+            // WIFI_MODE_FULL_HIGH_PERF is deprecated but is the broadest-compat mode
+            // that keeps Wi‑Fi awake for a LAN-reachable dev server under Doze.
+            val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+            wifiLock = wm?.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "vantaloom:runtime")?.apply {
+                setReferenceCounted(false)
+                runCatching { acquire() }
+            }
+        }
+    }
+
+    private fun releaseWakeLock() {
+        runCatching { if (wakeLock?.isHeld == true) wakeLock?.release() }
+        wakeLock = null
+        runCatching { if (wifiLock?.isHeld == true) wifiLock?.release() }
+        wifiLock = null
+    }
+
+    /** Reconcile the wake lock with the current preference (live toggle). */
+    fun reconcileWakeLock() {
+        if (RuntimePrefs.wakeLock(this)) acquireWakeLock() else releaseWakeLock()
     }
 
     companion object {
@@ -71,6 +149,13 @@ class LoomForegroundService : Service() {
         private const val CONTENT_REQUEST_CODE = 1003
         private const val ACTION_START = "online.timefiles.vantaloom.action.START_BACKGROUND_SESSION"
         private const val ACTION_STOP = "online.timefiles.vantaloom.action.STOP_BACKGROUND_SESSION"
+        private const val ACTION_RELAUNCH = "online.timefiles.vantaloom.action.RELAUNCH_BACKGROUND_SESSION"
+
+        // Live instance so a settings toggle can reconcile the wake lock without
+        // restarting the service. Nulled in onDestroy; a Service outlives no
+        // Activity leak here since it is cleared on teardown.
+        @Volatile
+        private var instance: LoomForegroundService? = null
 
         fun start(context: Context) {
             val intent = Intent(context, LoomForegroundService::class.java).setAction(ACTION_START)
@@ -79,6 +164,21 @@ class LoomForegroundService : Service() {
             } else {
                 context.startService(intent)
             }
+        }
+
+        /** Boot / app-update autostart: start the service and relaunch the runtime. */
+        fun startForRelaunch(context: Context) {
+            val intent = Intent(context, LoomForegroundService::class.java).setAction(ACTION_RELAUNCH)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                context.startForegroundService(intent)
+            } else {
+                context.startService(intent)
+            }
+        }
+
+        /** Apply a changed wake-lock preference to the running service, if any. */
+        fun applyWakeLockPreference(context: Context) {
+            instance?.reconcileWakeLock()
         }
 
         fun stopIfIdle(context: Context) {
@@ -132,6 +232,10 @@ class LoomForegroundService : Service() {
     }
 
     private fun stopAllWork() {
+        // A genuine stop clears the user's "keep running" intent so sticky restart
+        // and boot autostart do not resurrect the runtime.
+        RuntimePrefs.setShouldRun(this, false)
+        releaseWakeLock()
         LocalRuntime.requestStop()
         runCatching { Loom.stop() }
         LocalRuntime.stop()

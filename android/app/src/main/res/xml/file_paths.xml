@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- FileProvider 暴露面：相机拍照缓存 + 分享出站缓存（LoomJsBridge.shareFile）。 -->
+<!-- FileProvider 暴露面：相机拍照缓存 + 分享出站缓存（LoomJsBridge.shareFile）
+     + 应用内更新下载的 APK（AppUpdate → 系统安装器）。 -->
 <paths>
     <cache-path name="camera" path="camera/" />
     <cache-path name="share" path="share/" />
+    <cache-path name="update" path="update/" />
 </paths>

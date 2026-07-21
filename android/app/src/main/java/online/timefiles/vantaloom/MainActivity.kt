@@ -770,7 +770,18 @@ class MainActivity : Activity() {
       N.shareFile(callbackId, String(path || ""), String(name || ""));
     },
     startLocalRuntime: function (callbackId) { N.startLocalRuntime(__loomSecret, callbackId); },
-    stopLocalRuntime: function (callbackId) { N.stopLocalRuntime(__loomSecret, callbackId); }
+    stopLocalRuntime: function (callbackId) { N.stopLocalRuntime(__loomSecret, callbackId); },
+    appVersionName: function () { return N.appVersionName(); },
+    appUpdateStatus: function () { return N.appUpdateStatus(); },
+    checkAppUpdate: function (callbackId) { N.checkAppUpdate(callbackId); },
+    installAppUpdate: function (callbackId) { N.installAppUpdate(__loomSecret, callbackId); },
+    persistenceStatus: function () { return N.persistenceStatus(); },
+    setPersistenceOption: function (key, value, callbackId) {
+      N.setPersistenceOption(__loomSecret, callbackId, String(key || ""), !!value);
+    },
+    requestIgnoreBatteryOptimizations: function (callbackId) {
+      N.requestIgnoreBatteryOptimizations(__loomSecret, callbackId);
+    }
   };
 })();
 """.trimIndent()

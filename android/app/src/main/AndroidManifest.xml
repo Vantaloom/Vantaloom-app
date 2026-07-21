@@ -21,6 +21,13 @@
     <uses-permission
         android:name="android.permission.WRITE_EXTERNAL_STORAGE"
         android:maxSdkVersion="29" />
+    <!-- 后台常驻(Termux 式守护): 唤醒锁让长运行命令/开发服务器在 Doze 下不被冻结;
+         忽略电池优化避免系统冻结进程; 开机自启在重启/更新后拉回运行时。 -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- 应用内更新: 从 GitHub Releases 下载新 APK 后调用系统安装器就地更新。 -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <!-- 拍照走 ACTION_IMAGE_CAPTURE intent（刻意不声明 CAMERA 权限——不声明则
          intent 无需权限；一旦声明反而必须先请求授权）。Android 11+ 包可见性:
@@ -64,7 +71,8 @@
                 android:value="User-started local development runtime and device overlay connection" />
         </service>
 
-        <!-- 相机拍照的输出文件经 FileProvider 暴露给相机应用（cache/camera/）。 -->
+        <!-- 相机拍照的输出文件经 FileProvider 暴露给相机应用（cache/camera/）;
+             应用内更新下载的 APK 经同一 FileProvider 交系统安装器（cache/update/）。 -->
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"
@@ -74,6 +82,18 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_paths" />
         </provider>
+
+        <!-- 开机/应用更新后按用户意愿(开机自启+曾在运行)拉回后台运行时。 -->
+        <receiver
+            android:name=".BootReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
 
     </application>
 

@@ -1,11 +1,16 @@
 package online.timefiles.vantaloom
 
+import android.annotation.SuppressLint
 import android.content.Context
+import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Matrix
 import android.media.ExifInterface
 import android.net.Uri
+import android.os.Build
+import android.os.PowerManager
+import android.provider.Settings
 import android.util.Base64
 import android.webkit.JavascriptInterface
 import org.json.JSONArray
@@ -308,6 +313,9 @@ class LoomJsBridge(
             try {
                 LoomForegroundService.start(context)
                 val endpoint = LocalRuntime.ensureStarted(context)
+                // Record the user's intent so a sticky restart / boot autostart can
+                // bring the runtime back (the durable half of LocalRuntime's state).
+                RuntimePrefs.setShouldRun(context, true)
                 installLocalRuntimeAuth(endpoint)
                 resolve(callId, JSONObject().put("baseUrl", endpoint.baseUrl).toString())
             } catch (e: Throwable) {
@@ -326,6 +334,8 @@ class LoomJsBridge(
         }
         worker.execute {
             try {
+                // Explicit stop clears the keep-running intent so nothing resurrects it.
+                RuntimePrefs.setShouldRun(context, false)
                 LocalRuntime.stop()
                 evalJs("window.__loomClearLocalRuntimeAuth && window.__loomClearLocalRuntimeAuth()")
                 resolve(callId, "")
@@ -333,6 +343,129 @@ class LoomJsBridge(
                 reject(callId, e.message ?: "本地运行时停止失败")
             } finally {
                 LoomForegroundService.stopIfIdle(context)
+            }
+        }
+    }
+
+    // ---- App self-update (GitHub Releases) ----
+
+    /** The installed APK versionName (display only). */
+    @JavascriptInterface
+    fun appVersionName(): String = try {
+        context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: ""
+    } catch (_: Throwable) {
+        ""
+    }
+
+    /** The cached update state JSON (phase/current/latest/progress/…); sync. */
+    @JavascriptInterface
+    fun appUpdateStatus(): String = AppUpdate.status(context).toJson()
+
+    /** Check GitHub for a newer APK and auto-download it; resolves the new state. */
+    @JavascriptInterface
+    fun checkAppUpdate(callId: String) {
+        worker.execute {
+            try {
+                resolve(callId, AppUpdate.check(context, autoDownload = true).toJson())
+            } catch (e: Throwable) {
+                reject(callId, e.message ?: "检查更新失败")
+            }
+        }
+    }
+
+    /** Hand the downloaded APK to the system installer (privileged → secret-gated). */
+    @JavascriptInterface
+    fun installAppUpdate(secret: String, callId: String) {
+        if (!authorized(secret)) {
+            reject(callId, "unauthorized")
+            return
+        }
+        // startActivity must run on the main thread.
+        android.os.Handler(context.mainLooper).post {
+            try {
+                resolve(callId, JSONObject().put("result", AppUpdate.install(context)).toString())
+            } catch (e: Throwable) {
+                reject(callId, e.message ?: "安装失败")
+            }
+        }
+    }
+
+    // ---- Background persistence ----
+
+    /** Keep-alive / wake-lock / boot-autostart flags + battery-optimization state; sync. */
+    @JavascriptInterface
+    fun persistenceStatus(): String {
+        val ignoring = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val pm = context.getSystemService(Context.POWER_SERVICE) as PowerManager
+            pm.isIgnoringBatteryOptimizations(context.packageName)
+        } else {
+            true
+        }
+        return JSONObject()
+            .put("keepAlive", RuntimePrefs.keepAlive(context))
+            .put("wakeLock", RuntimePrefs.wakeLock(context))
+            .put("bootAutostart", RuntimePrefs.bootAutostart(context))
+            .put("ignoringBattery", ignoring)
+            .put("shouldRun", RuntimePrefs.shouldRun(context))
+            .toString()
+    }
+
+    /** Toggle a persistence option (privileged → secret-gated); resolves new status. */
+    @JavascriptInterface
+    fun setPersistenceOption(secret: String, callId: String, key: String, value: Boolean) {
+        if (!authorized(secret)) {
+            reject(callId, "unauthorized")
+            return
+        }
+        worker.execute {
+            try {
+                when (key) {
+                    "keepAlive" -> RuntimePrefs.setKeepAlive(context, value)
+                    "wakeLock" -> {
+                        RuntimePrefs.setWakeLock(context, value)
+                        LoomForegroundService.applyWakeLockPreference(context)
+                    }
+                    "bootAutostart" -> RuntimePrefs.setBootAutostart(context, value)
+                    else -> throw IllegalArgumentException("unknown option: $key")
+                }
+                resolve(callId, persistenceStatus())
+            } catch (e: Throwable) {
+                reject(callId, e.message ?: "设置失败")
+            }
+        }
+    }
+
+    /** Open the system "ignore battery optimizations" prompt for this app. */
+    @SuppressLint("BatteryLife")
+    @JavascriptInterface
+    fun requestIgnoreBatteryOptimizations(secret: String, callId: String) {
+        if (!authorized(secret)) {
+            reject(callId, "unauthorized")
+            return
+        }
+        android.os.Handler(context.mainLooper).post {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+                resolve(callId, "")
+                return@post
+            }
+            try {
+                context.startActivity(
+                    Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+                        .setData(Uri.parse("package:${context.packageName}"))
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                )
+                resolve(callId, "")
+            } catch (_: Throwable) {
+                // Some OEMs block the direct request; fall back to the list screen.
+                try {
+                    context.startActivity(
+                        Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    )
+                    resolve(callId, "")
+                } catch (e: Throwable) {
+                    reject(callId, e.message ?: "无法打开电池优化设置")
+                }
             }
         }
     }
