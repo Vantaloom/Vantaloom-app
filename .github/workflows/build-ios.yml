@@ -1,17 +1,19 @@
-# 草案：给公开仓 Vantaloom-app 用的 iOS 无签名构建 workflow。
+# 草案：给公开仓 Vantaloom-app 用的 iOS 无签名构建 workflow（仅操控端壳）。
 #
 # 注意：这是放在私仓 apps/ios/ci/ 下的**草案**，不在任何 .github/workflows/ 里。
-# 发布时随 apps/ios/ → 公开仓 ios/ 同步，再由主代理决定是否搬到
+# 发布时随 apps/ios/ → 公开仓 ios/ 同步，再由主代理搬到
 # 公开仓 .github/workflows/build-ios.yml。形状照 build-desktop.yml：触发 ios/**，
 # 产物上 Release，tag ios-build<run>-<sha>，--latest=false（APK 保持 Latest）。
+# 第一版脚手架（Build iOS run 2）已实测过：XcodeGen 结构 / archive 步骤（无 xcpretty、
+# tee + PIPESTATUS[0]）/ 无签名 IPA 打包 / Release 发布——这些写法原样保留。
 #
 # 产物是**无签名 IPA**（CODE_SIGNING_ALLOWED=NO 的 .xcarchive 里的 .app 打成
 # Payload/ zip）。它不能直接装到手机上；用户在 Mac 上用自己的开发者账号补签名
-# （或直接用 Xcode 从源码构建）后走 TestFlight / 直装。步骤见
-# docs/research/ios-sandbox-2026-09/05-distribution.md。
+# （或直接用 Xcode 从源码构建）后走 TestFlight / 直装。
 #
-# 没有运行时 xcframework 时照样出 IPA（壳显示「运行时未打包」）。有
-# ios/runtime/xcframework.lock 时从 Release 资产下载并 sha256 校验后带运行时构建。
+# 没有操控端节点 xcframework 时照样出 IPA（壳显示「操控端节点未打包」，文件名带
+# nonode）。有 ios/node/xcframework.lock 时从 Release 资产下载并 sha256 校验后带
+# 节点库构建。
 
 name: Build iOS
 
@@ -77,29 +79,29 @@ jobs:
           if [ -n "$LEAK" ]; then echo "::error::PUBLIC SOURCE LEAK BLOCKED:"; echo "$LEAK"; exit 1; fi
           echo "web/ staged: $NEXT_COUNT files under _next/"
 
-      # ── 运行时：有 lock 就取，没有就出占位版 ──
-      - name: Fetch runtime xcframework (optional)
-        id: runtime
+      # ── 操控端节点：有 lock 就取，没有就出占位版 ──
+      - name: Fetch controller node xcframework (optional)
+        id: node
         run: |
           set -euo pipefail
-          LOCK="runtime/xcframework.lock"
+          LOCK="node/xcframework.lock"
           if [ ! -f "$LOCK" ]; then
-            echo "runtime=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::ios/runtime/xcframework.lock 不存在——构建不带运行时的占位版 IPA"
+            echo "node=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::ios/node/xcframework.lock 不存在——构建不带操控端节点的占位版 IPA"
             exit 0
           fi
           URL="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["url"])' "$LOCK")"
           SHA="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["sha256"])' "$LOCK")"
-          curl -fsSL --retry 3 --retry-delay 2 -o runtime.zip "$URL"
-          echo "$SHA  runtime.zip" | shasum -a 256 -c -
-          rm -rf runtime/VantaloomRuntime.xcframework
-          unzip -q runtime.zip -d runtime/
-          test -d runtime/VantaloomRuntime.xcframework || { echo "::error::zip 里没有 VantaloomRuntime.xcframework"; exit 1; }
-          echo "runtime=true" >> "$GITHUB_OUTPUT"
+          curl -fsSL --retry 3 --retry-delay 2 -o node.zip "$URL"
+          echo "$SHA  node.zip" | shasum -a 256 -c -
+          rm -rf node/VantaloomNode.xcframework
+          unzip -q node.zip -d node/
+          test -d node/VantaloomNode.xcframework || { echo "::error::zip 里没有 VantaloomNode.xcframework"; exit 1; }
+          echo "node=true" >> "$GITHUB_OUTPUT"
 
       - name: Generate Xcode project
         env:
-          VANTALOOM_IOS_RUNTIME: ${{ steps.runtime.outputs.runtime }}
+          VANTALOOM_IOS_NODE: ${{ steps.node.outputs.node }}
         run: |
           set -euo pipefail
           xcodegen generate --spec project.yml
@@ -149,7 +151,7 @@ jobs:
           mkdir -p build/Payload
           cp -R build/Vantaloom.xcarchive/Products/Applications/Vantaloom.app build/Payload/
           SUFFIX="unsigned"
-          if [ "${{ steps.runtime.outputs.runtime }}" != "true" ]; then SUFFIX="unsigned-noruntime"; fi
+          if [ "${{ steps.node.outputs.node }}" != "true" ]; then SUFFIX="unsigned-nonode"; fi
           ( cd build && zip -qr "Vantaloom-ios-${SUFFIX}.ipa" Payload )
           ls -la build/*.ipa
 
@@ -190,10 +192,10 @@ jobs:
         run: |
           set -euo pipefail
           : > notes.md
-          echo 'iOS 壳（SwiftUI + WKWebView）无签名 IPA。' >> notes.md
+          echo 'iOS 操控端壳（SwiftUI + WKWebView，仅操控：登录账号 → 选电脑 → 连过去，手机上不跑智能体）无签名 IPA。' >> notes.md
           echo '' >> notes.md
           echo '- 这不是可直接安装的包：没有开发者签名。用 Mac 上的 Xcode / `codesign` + 自己的 Provisioning Profile 重签，或直接从源码 `ios/` 用 Xcode 构建，再走 TestFlight / 直装。' >> notes.md
-          echo '- 文件名带 `noruntime` 的版本没有内置 Go 运行时，打开只会显示「运行时未打包」占位页；带运行时的版本需要 `ios/runtime/xcframework.lock` 指向一份已发布的 xcframework。' >> notes.md
+          echo '- 文件名带 `nonode` 的版本没有内置操控端节点，打开只会显示「操控端节点未打包」占位页；带节点的版本需要 `ios/node/xcframework.lock` 指向一份已发布的 VantaloomNode.xcframework。' >> notes.md
           cat notes.md
 
       - name: Publish to a GitHub Release

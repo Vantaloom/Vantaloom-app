@@ -31,7 +31,7 @@
 
 	<key>UIApplicationSceneManifest</key>
 	<dict>
-		<!-- 第一期只跑一个场景：运行时是进程级单例，多窗口 = 多个 WebView 共用同一份，
+		<!-- 操控端节点是进程级单例，多窗口 = 多个 WebView 共用同一份回环代理与目标机器；
 		     iPad 多窗口留到验证过之后再开。 -->
 		<key>UIApplicationSupportsMultipleScenes</key>
 		<false/>
@@ -52,34 +52,35 @@
 	<key>UIRequiresFullScreen</key>
 	<false/>
 
-	<!-- ATS：壳只连 http://127.0.0.1:<port>。按社区实测，字面 IP 回环本来就不受
-	     ATS 约束（用 "localhost" 主机名才需要例外），但 NSAllowsLocalNetworking
-	     是官方口径、且覆盖将来的局域网直连，显式打开。绝不开 NSAllowsArbitraryLoads。 -->
+	<!-- ATS：WKWebView 只连 http://127.0.0.1:<port>（回环，页面与 API 同源）；
+	     Hub 走 https。按社区实测，字面 IP 回环本来就不受 ATS 约束（用 "localhost"
+	     主机名才需要例外），但 NSAllowsLocalNetworking 是官方口径、且覆盖预览
+	     iframe 里的局域网 http 文档（设计预览/开发服务器），显式打开。
+	     绝不开 NSAllowsArbitraryLoads。loomnet 的 QUIC/UDP 与 mTLS 走 Go 自己的
+	     网络栈，不经 URLSession，与 ATS 无关。 -->
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
 
-	<!-- 「本地网络」权限说明：**回环不触发这个弹窗**，第一期壳把 loomnet 覆盖网
-	     关掉（disableOverlay），所以第一期用不到。留着是为了第二期局域网直连 /
-	     打洞（任何离开回环的 LAN 流量都会弹它），缺了这条 iOS 会直接拒绝流量而不弹窗。 -->
+	<!-- 「本地网络」权限说明（iOS 14+）：操控端节点向同一局域网内的电脑发起 QUIC/UDP
+	     直连（局域网直连是优先级最高的连接方式），第一次发包时系统会弹这个授权框；
+	     缺了这条 iOS 会直接丢弃流量而不弹窗，表现为局域网直连恒超时、只剩中继。
+	     回环不触发它；Hub（公网 https）不触发它。 -->
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>Vantaloom 用局域网直连同账号的其他机器（工作组联机与文件访问）。</string>
+	<string>Vantaloom 需要访问本地网络，以便通过局域网直接连接到同一账号下的电脑（速度最快、不经服务器）。拒绝后仍可经公网直连或服务器中继连接。</string>
 
-	<!-- TestFlight 上传时免答出口合规问卷：只用系统 TLS，没有自带加密。 -->
+	<!-- TestFlight 上传时免答出口合规问卷。诚实边界：loomnet 用的是 mTLS + QUIC
+	     （Go 标准库 crypto/tls），属「标准加密协议」豁免类别；上架前按 App Store
+	     Connect 的问卷口径复核这一项。 -->
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
 
-	<!-- ── 刻意没开的东西（第二期按裁决再加）──
-	     UIBackgroundModes：iOS 应用切后台约 30 秒（beginBackgroundTask）后挂起，
-	     挂起时进程内的 HTTP 服务、goroutine、到模型渠道的 SSE 一起冻结；恢复时回环
-	     监听套接字可能已被系统回收。合法的延长手段只有 iOS 26 的
-	     BGContinuedProcessingTask（用户点按钮发起的「可见进度」任务，需要
-	     BGTaskSchedulerPermittedIdentifiers），以及 audio/location/voip 这类**会被
-	     审核打回的借口式后台模式**。见 docs/research/ios-sandbox-2026-09/01-ios-process-model.md §5。
-	     <key>UIBackgroundModes</key><array><string>processing</string></array>
-	     <key>BGTaskSchedulerPermittedIdentifiers</key><array><string>online.timefiles.vantaloom.run.*</string></array>
-	-->
+	<!-- ── 刻意没开的东西 ──
+	     UIBackgroundModes：操控端切后台约 30 秒后挂起，QUIC 会话与信令 WS 一起冻结；
+	     回前台由 ControllerHost 调节点 Resume 重连并显示状态卡。操控端没有「必须在
+	     后台继续跑」的工作（agent 在电脑上跑），借口式后台模式（audio/location/voip）
+	     会被审核打回，也没有必要。 -->
 </dict>
 </plist>

@@ -9,7 +9,8 @@
 //
 //   - a mini Hub client (hubclient.go) implementing loomnet.Directory and
 //     keeping the signaling WS alive (Hub-side presence);
-//   - a 127.0.0.1 loopback HTTP proxy (proxy.go) that rewrites requests to
+//   - a 127.0.0.1 loopback HTTP proxy (loomnet.LoopbackProxy — shared with the
+//     iOS controller node, internal/controllernode) that rewrites requests to
 //     http://<target>.loom<path> and round-trips them over node.Transport(),
 //     streaming responses (SSE-safe) and tunnelling WebSocket upgrades.
 //
@@ -50,7 +51,7 @@ type Bridge struct {
 	cancel context.CancelFunc
 	node   *loomnet.Node
 	hub    *hubClient
-	proxy  *loopbackProxy
+	proxy  *loomnet.LoopbackProxy
 	warm   *http.Client // over node.Transport(), for the Connect warm-up dial
 
 	state string // "idle" | "connecting" | "connected" | "error"
@@ -124,8 +125,8 @@ func (b *Bridge) StartNode(dataDir, hubBaseURL, machineID, hubToken string) erro
 	})
 	hub.start(ctx) // presence WS + heartbeat + peer-list poll loops
 
-	proxy := newLoopbackProxy(node, b.target)
-	if err := proxy.start(); err != nil {
+	proxy := loomnet.NewLoopbackProxy(node.Transport(), b.target)
+	if err := proxy.Start(); err != nil {
 		node.Stop()
 		hub.stop()
 		cancel()
@@ -147,7 +148,7 @@ func (b *Bridge) LoopbackPort() int {
 	if b.proxy == nil {
 		return 0
 	}
-	return b.proxy.port()
+	return b.proxy.Port()
 }
 
 // Connect points the loopback proxy at machineID and warms the overlay dial so
@@ -271,7 +272,7 @@ func (b *Bridge) Stop() {
 
 	b.currentTarget.Store("")
 	if proxy != nil {
-		proxy.stop()
+		proxy.Stop()
 	}
 	if node != nil {
 		node.Stop()

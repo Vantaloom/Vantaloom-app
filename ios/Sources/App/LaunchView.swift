@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// 启动页：运行时起来之前的那一两秒。文案来自 RuntimeHost.progressMessage。
+/// 启动页：回环服务起来之前的那一两秒。文案来自 ControllerHost.progressMessage。
 struct LaunchView: View {
     let message: String
 
@@ -22,9 +22,9 @@ struct LaunchView: View {
     }
 }
 
-/// 占位 / 错误页。`retry` 为 nil 时不渲染重试按钮（「运行时未打包」这种结构性
+/// 占位 / 错误页。`retry` 为 nil 时不渲染重试按钮（「节点未打包」这种结构性
 /// 不可用不该给一颗点了也没用的按钮——置灰与不渲染的判据见 CLAUDE.md 前端约定）。
-struct RuntimeUnavailableView: View {
+struct NodeUnavailableView: View {
     let title: String
     let reason: String
     let detail: String

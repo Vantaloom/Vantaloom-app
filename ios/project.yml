@@ -1,15 +1,17 @@
-# Vantaloom iOS 壳 —— XcodeGen 工程描述（不要手写 .pbxproj）。
+# Vantaloom iOS 壳（仅操控端）—— XcodeGen 工程描述（不要手写 .pbxproj）。
 #
 #   brew install xcodegen
-#   VANTALOOM_IOS_RUNTIME=false xcodegen generate      # 没有运行时 xcframework 时（CI 默认）
-#   VANTALOOM_IOS_RUNTIME=true  xcodegen generate      # runtime/VantaloomRuntime.xcframework 就位时
+#   VANTALOOM_IOS_NODE=false xcodegen generate      # 没有节点 xcframework 时（CI 默认）
+#   VANTALOOM_IOS_NODE=true  xcodegen generate      # node/VantaloomNode.xcframework 就位时
 #
-# 两种形态都必须能出 IPA：没有运行时时壳显示「运行时未打包」占位页；有运行时时
-# 由 project-runtime.yml 追加依赖与 -DVANTALOOM_EMBEDDED_RUNTIME 编译旗标。
+# 两种形态都必须能出 IPA：没有节点库时壳显示「操控端节点未打包」占位页；有节点库时
+# 由 project-node.yml 追加依赖与 -DVANTALOOM_EMBEDDED_NODE 编译旗标。
 # `include.enable` 吃环境变量（XcodeGen 官方特性），CI 按 xcframework 是否存在设它。
 #
 # 公开仓布局：本目录整份同步到 Vantaloom-app 仓的 ios/，编译后的前端在仓库根的
 # web/，CI 把它 rsync 到 ios/web/ 再生成工程（sources 里的 web 是 optional）。
+# 注意：公开仓同步用 robocopy /XD 排除目录名 web/Web，所以 Swift 源目录**不能叫 Web**
+# （现在是 Sources/Shell + Sources/Node + Sources/App）。
 
 name: Vantaloom
 
@@ -36,8 +38,8 @@ settings:
     SWIFT_STRICT_CONCURRENCY: minimal
 
 include:
-  - path: project-runtime.yml
-    enable: ${VANTALOOM_IOS_RUNTIME}
+  - path: project-node.yml
+    enable: ${VANTALOOM_IOS_NODE}
 
 targets:
   Vantaloom:
@@ -46,7 +48,7 @@ targets:
     sources:
       - path: Sources
       # 编译后的 Next.js 静态导出（index.html + _next/...）。以「文件夹引用」
-      # 整份拷进 .app/web/，运行时经 <InstallDir>/web 符号链接从这里提供页面。
+      # 整份拷进 .app/web/，操控端节点从这里原地提供页面（只读即可）。
       # 私仓里这个目录不存在（前端在 apps/vantaloom/out），所以 optional。
       - path: web
         type: folder

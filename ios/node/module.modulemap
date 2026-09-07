@@ -1,0 +1,8 @@
+// 进 xcframework 的 Headers/ 目录（build-node-xcframework.sh 拷贝）。
+// Swift 侧 `import VantaloomNode` 就能看到 cgo 生成的 libvantaloomnode.h。
+// link "resolv"：Go 1.20+ c-archive 在 darwin/ios 上要 libresolv（golang/go#58159）。
+module VantaloomNode {
+    header "libvantaloomnode.h"
+    link "resolv"
+    export *
+}

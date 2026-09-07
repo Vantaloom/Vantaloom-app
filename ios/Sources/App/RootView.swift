@@ -1,38 +1,51 @@
 import SwiftUI
 
-/// 按运行时状态切换三块画面：启动中 / 运行中（WebView）/ 不可用（占位或错误）。
+/// 按节点状态切换画面：启动中 / 运行中（WebView + 重连状态卡）/ 不可用（占位或错误）。
 ///
-/// 注意 React 那条「并列分支子结构不同 = 整棵重挂」的坑在 SwiftUI 里同样存在：
-/// `WebShellView` 只在 `.running` 分支里出现一次，状态从 running 变回 starting
-/// 再变 running 会重建 WKWebView——这是刻意的（运行时重启 = 新 bearer = 旧页面
-/// 的 cookie 已失效，必须重新走 vtlboot）。
+/// `WebShellView` 只在 `.running` 分支里出现一次：状态从 running 变回 starting
+/// 再变 running 会重建 WKWebView——这是刻意的（节点重启 = 新会话密钥 = 旧页面的
+/// cookie 已失效，必须重新走 vtlboot）。
 struct RootView: View {
-    @EnvironmentObject private var host: RuntimeHost
+    @EnvironmentObject private var host: ControllerHost
+
+    /// 页面推来的明暗（setChrome）；没推过就跟系统。
+    private var preferredScheme: ColorScheme? {
+        guard host.chromeColor != nil else { return nil }
+        return host.chromeDark ? ColorScheme.dark : ColorScheme.light
+    }
 
     var body: some View {
-        ZStack {
-            switch host.state {
+        ZStack(alignment: .bottom) {
+            switch host.phase {
             case .idle, .starting:
                 LaunchView(message: host.progressMessage)
-            case let .running(endpoint):
-                WebShellView(endpoint: endpoint, reloadToken: host.reloadToken)
-                    .ignoresSafeArea(.keyboard, edges: .bottom)
+            case .running:
+                WebShellView(
+                    launchURL: host.launchURL,
+                    reloadToken: host.reloadToken,
+                    initialStatusJSON: host.statusJSON
+                )
+                .ignoresSafeArea(.keyboard, edges: .bottom)
+                ConnectionOverlay()
+                    .animation(.easeInOut(duration: 0.2), value: host.resumePending)
             case let .unavailable(reason):
-                RuntimeUnavailableView(
-                    title: "运行时未打包",
+                NodeUnavailableView(
+                    title: "操控端节点未打包",
                     reason: reason,
-                    detail: "这份安装包里没有 VantaloomRuntime.xcframework。用 apps/ios/scripts/build-runtime-xcframework.sh 在 Mac 上构建后重新打包，或等公开仓 CI 从 Release 资产取到运行时。",
+                    detail: "这份安装包里没有 VantaloomNode.xcframework。用 apps/ios/scripts/build-node-xcframework.sh 在 Mac 上构建后重新打包，或等公开仓 CI 从 Release 资产取到节点库。",
                     retry: nil
                 )
             case let .failed(message):
-                RuntimeUnavailableView(
-                    title: "运行时启动失败",
+                NodeUnavailableView(
+                    title: "操控端启动失败",
                     reason: message,
-                    detail: "Xcode 控制台（stderr）里有运行时的 JSON 日志；日志文件在 Application Support/Vantaloom/install/logs/。",
+                    detail: "Xcode 控制台（stderr）里有节点的日志。",
                     retry: { Task { await host.startIfNeeded(force: true) } }
                 )
             }
         }
-        .background(Color(uiColor: .systemBackground))
+        // 安全区边条与页面同色（native-chrome.ts 经 setChrome 推来的背景色）。
+        .background((host.chromeColor ?? Color(uiColor: .systemBackground)).ignoresSafeArea())
+        .preferredColorScheme(preferredScheme)
     }
 }

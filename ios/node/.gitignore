@@ -1,0 +1,7 @@
+# Go c-archive 构建产物：只在 Mac 上产出，绝不提交（公开仓 CI 靠
+# xcframework.lock（url + sha256）从 Release 资产下载）。
+build/
+*.xcframework
+*.a
+*.h
+!module.modulemap
