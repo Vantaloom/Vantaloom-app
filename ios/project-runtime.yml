@@ -1,0 +1,21 @@
+# 由 project.yml 经 `include.enable: ${VANTALOOM_IOS_RUNTIME}` 条件并入。
+# 只在 runtime/VantaloomRuntime.xcframework 存在时启用；XcodeGen 合并规则：
+# 字典递归合并、数组追加、标量替换——所以这里只写「追加」的东西。
+#
+# xcframework 由 scripts/build-runtime-xcframework.sh 在 Mac 上产出（Go c-archive
+# + 头文件 + module map），gitignore 掉；公开仓 CI 按 runtime/xcframework.lock
+# 从 Release 资产下载并校验 sha256 后放到同一路径。
+
+targets:
+  Vantaloom:
+    dependencies:
+      - framework: runtime/VantaloomRuntime.xcframework
+        embed: false      # 静态库：链接即可，不能 embed
+    settings:
+      base:
+        # Swift 侧 `#if VANTALOOM_EMBEDDED_RUNTIME` 走真运行时分支。
+        OTHER_SWIFT_FLAGS: "$(inherited) -DVANTALOOM_EMBEDDED_RUNTIME"
+        # Go 1.20+ 的 c-archive 在 darwin/ios 上要 libresolv（net 包的 res_search
+        # trampoline；golang/go#58159）。module map 里也声明了 link "resolv"，这里
+        # 双保险。
+        OTHER_LDFLAGS: "$(inherited) -lresolv"

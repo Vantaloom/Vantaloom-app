@@ -1,0 +1,8 @@
+# Go c-archive 构建产物：只在 Mac 上产出，体积大（完整 vantaloom-api 的静态库，
+# 估计 100MB+，超过 GitHub 单文件 100MB 硬限），绝不提交。
+# 公开仓 CI 靠 xcframework.lock（url + sha256）从 Release 资产下载。
+build/
+*.xcframework
+*.a
+*.h
+!module.modulemap

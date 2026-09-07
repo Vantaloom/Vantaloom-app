@@ -1,0 +1,211 @@
+# 草案：给公开仓 Vantaloom-app 用的 iOS 无签名构建 workflow。
+#
+# 注意：这是放在私仓 apps/ios/ci/ 下的**草案**，不在任何 .github/workflows/ 里。
+# 发布时随 apps/ios/ → 公开仓 ios/ 同步，再由主代理决定是否搬到
+# 公开仓 .github/workflows/build-ios.yml。形状照 build-desktop.yml：触发 ios/**，
+# 产物上 Release，tag ios-build<run>-<sha>，--latest=false（APK 保持 Latest）。
+#
+# 产物是**无签名 IPA**（CODE_SIGNING_ALLOWED=NO 的 .xcarchive 里的 .app 打成
+# Payload/ zip）。它不能直接装到手机上；用户在 Mac 上用自己的开发者账号补签名
+# （或直接用 Xcode 从源码构建）后走 TestFlight / 直装。步骤见
+# docs/research/ios-sandbox-2026-09/05-distribution.md。
+#
+# 没有运行时 xcframework 时照样出 IPA（壳显示「运行时未打包」）。有
+# ios/runtime/xcframework.lock 时从 Release 资产下载并 sha256 校验后带运行时构建。
+
+name: Build iOS
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "ios/**"
+      - "web/**"
+      - ".github/workflows/build-ios.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: build-ios-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write # create a release + upload the IPA as a permanent asset
+
+jobs:
+  build:
+    name: Build unsigned IPA
+    # macos-latest 的 Xcode 版本跟着 GitHub 镜像走；无签名 IPA 对 SDK 版本没有硬要求。
+    # 要真上 App Store Connect（2026-04-28 起必须 Xcode 26 / iOS 26 SDK）是用户在
+    # Mac 上做的事，不在这条流水线里。
+    runs-on: macos-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: ios
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select latest stable Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Toolchain versions
+        run: |
+          xcodebuild -version
+          sw_vers
+
+      - name: Install XcodeGen
+        run: |
+          set -euo pipefail
+          if ! command -v xcodegen >/dev/null 2>&1; then
+            brew install xcodegen
+          fi
+          xcodegen --version
+
+      # ── 前端：与安卓同一纪律——只进编译产物，剔 source map，断言 _next/ 在场 ──
+      - name: Stage web export into ios/web
+        run: |
+          set -euo pipefail
+          rm -rf web
+          mkdir -p web
+          rsync -a --exclude '*.map' ../web/ web/
+          if [ ! -f web/index.html ]; then echo "::error::web/index.html 缺失——先同步前端编译产物"; exit 1; fi
+          NEXT_COUNT="$(find web/_next -type f | wc -l | tr -d ' ')"
+          if [ "$NEXT_COUNT" -lt 10 ]; then echo "::error::web/_next 只有 $NEXT_COUNT 个文件，前端导出不完整"; exit 1; fi
+          LEAK="$(find web -type f \( -name '*.map' -o -name '*.ts' -o -name '*.tsx' -o -name '*.jsx' \) | head -n 20 || true)"
+          if [ -n "$LEAK" ]; then echo "::error::PUBLIC SOURCE LEAK BLOCKED:"; echo "$LEAK"; exit 1; fi
+          echo "web/ staged: $NEXT_COUNT files under _next/"
+
+      # ── 运行时：有 lock 就取，没有就出占位版 ──
+      - name: Fetch runtime xcframework (optional)
+        id: runtime
+        run: |
+          set -euo pipefail
+          LOCK="runtime/xcframework.lock"
+          if [ ! -f "$LOCK" ]; then
+            echo "runtime=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::ios/runtime/xcframework.lock 不存在——构建不带运行时的占位版 IPA"
+            exit 0
+          fi
+          URL="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["url"])' "$LOCK")"
+          SHA="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["sha256"])' "$LOCK")"
+          curl -fsSL --retry 3 --retry-delay 2 -o runtime.zip "$URL"
+          echo "$SHA  runtime.zip" | shasum -a 256 -c -
+          rm -rf runtime/VantaloomRuntime.xcframework
+          unzip -q runtime.zip -d runtime/
+          test -d runtime/VantaloomRuntime.xcframework || { echo "::error::zip 里没有 VantaloomRuntime.xcframework"; exit 1; }
+          echo "runtime=true" >> "$GITHUB_OUTPUT"
+
+      - name: Generate Xcode project
+        env:
+          VANTALOOM_IOS_RUNTIME: ${{ steps.runtime.outputs.runtime }}
+        run: |
+          set -euo pipefail
+          xcodegen generate --spec project.yml
+          ls -la
+
+      - name: Archive (unsigned)
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          # 不接 xcpretty：镜像里未必有，而 tee 的下游一消失就 SIGPIPE 把 tee 连同
+          # xcodebuild 一起打死，日志截断、构建中断。原始输出直接进日志文件。
+          set +e
+          xcodebuild archive \
+            -project Vantaloom.xcodeproj \
+            -scheme Vantaloom \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath build/Vantaloom.xcarchive \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            DEVELOPMENT_TEAM="" \
+            2>&1 | tee build/xcodebuild.log
+          XC_EXIT=${PIPESTATUS[0]}
+          set -e
+          echo "xcodebuild exit=$XC_EXIT"
+          if [ "$XC_EXIT" != "0" ]; then
+            echo "::error::xcodebuild archive 退出码 $XC_EXIT，见下方日志末尾"
+            grep -n "error:" build/xcodebuild.log | head -n 40 || true
+            tail -n 60 build/xcodebuild.log
+            exit 1
+          fi
+          APP="build/Vantaloom.xcarchive/Products/Applications/Vantaloom.app"
+          if [ ! -d "$APP" ]; then
+            echo "::error::archive 没有产出 Vantaloom.app，见 xcodebuild.log 末尾"
+            tail -n 80 build/xcodebuild.log
+            exit 1
+          fi
+          # 断言前端进了包（对应安卓 CI 的 assets/_next 断言）。
+          NEXT_IN_APP="$(find "$APP/web/_next" -type f 2>/dev/null | wc -l | tr -d ' ')"
+          if [ "$NEXT_IN_APP" -lt 10 ]; then echo "::error::.app/web/_next 缺失或不完整（$NEXT_IN_APP）"; exit 1; fi
+
+      - name: Package IPA
+        run: |
+          set -euo pipefail
+          rm -rf build/Payload build/*.ipa
+          mkdir -p build/Payload
+          cp -R build/Vantaloom.xcarchive/Products/Applications/Vantaloom.app build/Payload/
+          SUFFIX="unsigned"
+          if [ "${{ steps.runtime.outputs.runtime }}" != "true" ]; then SUFFIX="unsigned-noruntime"; fi
+          ( cd build && zip -qr "Vantaloom-ios-${SUFFIX}.ipa" Payload )
+          ls -la build/*.ipa
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-unsigned
+          path: ios/build/*.ipa
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Collect + stamp
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          SHA="$(git rev-parse --short HEAD)"
+          for f in $(find artifacts -name '*.ipa'); do
+            base="$(basename "$f" .ipa)"
+            cp "$f" "dist/${base}-build${GITHUB_RUN_NUMBER}-${SHA}.ipa"
+          done
+          echo "SHA=$SHA" >> "$GITHUB_ENV"
+          ls -la dist
+
+      - name: Write release notes
+        run: |
+          set -euo pipefail
+          : > notes.md
+          echo 'iOS 壳（SwiftUI + WKWebView）无签名 IPA。' >> notes.md
+          echo '' >> notes.md
+          echo '- 这不是可直接安装的包：没有开发者签名。用 Mac 上的 Xcode / `codesign` + 自己的 Provisioning Profile 重签，或直接从源码 `ios/` 用 Xcode 构建，再走 TestFlight / 直装。' >> notes.md
+          echo '- 文件名带 `noruntime` 的版本没有内置 Go 运行时，打开只会显示「运行时未打包」占位页；带运行时的版本需要 `ios/runtime/xcframework.lock` 指向一份已发布的 xcframework。' >> notes.md
+          cat notes.md
+
+      - name: Publish to a GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="ios-build${GITHUB_RUN_NUMBER}-${SHA}"
+          if [ -z "$(ls -A dist 2>/dev/null)" ]; then echo "ERROR: no IPA to release"; exit 1; fi
+          # --latest=false：APK 保持仓库的 Latest；iOS 构建按 ios-* tag 找。
+          gh release create "$TAG" dist/* \
+            --title "Vantaloom iOS · build ${GITHUB_RUN_NUMBER} (${SHA}) · unsigned" \
+            --notes-file notes.md \
+            --latest=false
+          echo "Released $TAG"

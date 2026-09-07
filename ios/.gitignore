@@ -1,0 +1,11 @@
+# XcodeGen 生成的工程与构建产物
+*.xcodeproj
+*.xcworkspace
+build/
+DerivedData/
+xcuserdata/
+# CI 把公开仓根的 web/ 同步到这里；私仓里前端在 apps/vantaloom/out。
+# 必须锚定到本目录根（/web/）：不锚定的 web/ 在 Windows/macOS 的大小写不敏感
+# 匹配下会把 Sources/Web/ 一起吞掉（实锤：LoomBridge.swift 差点没进仓）。
+/web/
+# 运行时 xcframework 见 runtime/.gitignore

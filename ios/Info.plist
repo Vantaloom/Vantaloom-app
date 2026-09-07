@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- 手写 Info.plist（project.yml 里 GENERATE_INFOPLIST_FILE=NO）。
+	     $(...) 由 Xcode 在构建时替换。 -->
+	<key>CFBundleDevelopmentRegion</key>
+	<string>zh_CN</string>
+	<key>CFBundleDisplayName</key>
+	<string>Vantaloom</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>$(PRODUCT_NAME)</string>
+	<key>CFBundlePackageType</key>
+	<string>$(PRODUCT_BUNDLE_PACKAGE_TYPE)</string>
+	<key>CFBundleShortVersionString</key>
+	<string>$(MARKETING_VERSION)</string>
+	<key>CFBundleVersion</key>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>LSRequiresIPhoneOS</key>
+	<true/>
+
+	<!-- SwiftUI 无 storyboard 启动：空字典即可拿到全屏（否则 iPhone 上会被信箱化）。 -->
+	<key>UILaunchScreen</key>
+	<dict/>
+
+	<key>UIApplicationSceneManifest</key>
+	<dict>
+		<!-- 第一期只跑一个场景：运行时是进程级单例，多窗口 = 多个 WebView 共用同一份，
+		     iPad 多窗口留到验证过之后再开。 -->
+		<key>UIApplicationSupportsMultipleScenes</key>
+		<false/>
+	</dict>
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+	<key>UISupportedInterfaceOrientations~ipad</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationPortraitUpsideDown</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+	<key>UIRequiresFullScreen</key>
+	<false/>
+
+	<!-- ATS：壳只连 http://127.0.0.1:<port>。按社区实测，字面 IP 回环本来就不受
+	     ATS 约束（用 "localhost" 主机名才需要例外），但 NSAllowsLocalNetworking
+	     是官方口径、且覆盖将来的局域网直连，显式打开。绝不开 NSAllowsArbitraryLoads。 -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+
+	<!-- 「本地网络」权限说明：**回环不触发这个弹窗**，第一期壳把 loomnet 覆盖网
+	     关掉（disableOverlay），所以第一期用不到。留着是为了第二期局域网直连 /
+	     打洞（任何离开回环的 LAN 流量都会弹它），缺了这条 iOS 会直接拒绝流量而不弹窗。 -->
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Vantaloom 用局域网直连同账号的其他机器（工作组联机与文件访问）。</string>
+
+	<!-- TestFlight 上传时免答出口合规问卷：只用系统 TLS，没有自带加密。 -->
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
+
+	<!-- ── 刻意没开的东西（第二期按裁决再加）──
+	     UIBackgroundModes：iOS 应用切后台约 30 秒（beginBackgroundTask）后挂起，
+	     挂起时进程内的 HTTP 服务、goroutine、到模型渠道的 SSE 一起冻结；恢复时回环
+	     监听套接字可能已被系统回收。合法的延长手段只有 iOS 26 的
+	     BGContinuedProcessingTask（用户点按钮发起的「可见进度」任务，需要
+	     BGTaskSchedulerPermittedIdentifiers），以及 audio/location/voip 这类**会被
+	     审核打回的借口式后台模式**。见 docs/research/ios-sandbox-2026-09/01-ios-process-model.md §5。
+	     <key>UIBackgroundModes</key><array><string>processing</string></array>
+	     <key>BGTaskSchedulerPermittedIdentifiers</key><array><string>online.timefiles.vantaloom.run.*</string></array>
+	-->
+</dict>
+</plist>
