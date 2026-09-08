@@ -14,8 +14,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gorilla/websocket"
-
 	"vantaloom.local/loomnetmobile/loomnet"
 )
 
@@ -24,8 +22,8 @@ import (
 // /api/machines/peers) and keeps the signaling WS alive (the Hub derives
 // presence from WS liveness). It mirrors the desktop hubconn.Client's overlay
 // role but imports only stdlib + gorilla/websocket so the whole package stays
-// gomobile-bindable. LAN direct is the only connection method — there is no
-// relay config and no hole-punch signaling.
+// gomobile-bindable. Overlay configuration and bounded punch signaling live in
+// overlay.go and signaling.go; no desktop/server dependencies are needed.
 type hubClient struct {
 	httpBase  string // normalized http(s):// base (no trailing slash)
 	wsURL     string // ws(s)://<host>/api/ws/signal
@@ -47,6 +45,24 @@ type hubClient struct {
 
 	stopOnce sync.Once
 	done     chan struct{}
+
+	// tokenMu orders token generations, config publication and WS installation.
+	generation  uint64
+	refresh     chan struct{}
+	peerRefresh chan struct{}
+	reconnect   chan struct{}
+	configReady chan struct{}
+	configOnce  sync.Once
+	configErr   string
+	configKnown bool
+	node        *loomnet.Node
+	applyMu     sync.Mutex // also serializes the legacy B-side config read
+	lifeCancel  context.CancelFunc
+	wg          sync.WaitGroup
+	wsMu        sync.Mutex
+	ws          *signalSession
+	handleOffer func(string, string) (string, error)
+	handlers    chan struct{}
 }
 
 // overlayPeer is a cached peer's pinned identity + dial endpoints.
@@ -82,6 +98,11 @@ func newHubClient(hubBaseURL, machineID, token string) *hubClient {
 		tok:         token,
 		peerOverlay: map[string]overlayPeer{},
 		done:        make(chan struct{}),
+		refresh:     make(chan struct{}, 1),
+		peerRefresh: make(chan struct{}, 1),
+		reconnect:   make(chan struct{}, 1),
+		configReady: make(chan struct{}),
+		handlers:    make(chan struct{}, 4),
 	}
 }
 
@@ -89,8 +110,35 @@ func newHubClient(hubBaseURL, machineID, token string) *hubClient {
 
 func (c *hubClient) setToken(t string) {
 	c.tokenMu.Lock()
+	defer c.tokenMu.Unlock()
+	select {
+	case <-c.done:
+		return
+	default:
+	}
+	if c.tok == t {
+		return
+	}
 	c.tok = t
-	c.tokenMu.Unlock()
+	c.generation++
+	c.configKnown = false
+	c.configErr = "overlay config refresh pending"
+	c.peerMu.Lock()
+	c.peerOverlay = map[string]overlayPeer{}
+	c.peerMu.Unlock()
+	select {
+	case c.peerRefresh <- struct{}{}:
+	default:
+	}
+	c.closeSignaling()
+	select {
+	case c.refresh <- struct{}{}:
+	default:
+	}
+	select {
+	case c.reconnect <- struct{}{}:
+	default:
+	}
 }
 
 func (c *hubClient) token() string {
@@ -139,13 +187,24 @@ func (c *hubClient) AccountFingerprints() map[string]string {
 // start launches the signaling-WS, heartbeat, and peer-poll loops for the node's
 // lifetime (ctx).
 func (c *hubClient) start(ctx context.Context) {
-	go c.wsLoop(ctx)
-	go c.heartbeatLoop(ctx)
-	go c.peerPollLoop(ctx)
+	ctx, c.lifeCancel = context.WithCancel(ctx)
+	for _, loop := range []func(context.Context){c.wsLoop, c.heartbeatLoop, c.peerPollLoop, c.configLoop} {
+		c.wg.Add(1)
+		go func(fn func(context.Context)) { defer c.wg.Done(); fn(ctx) }(loop)
+	}
 }
 
 func (c *hubClient) stop() {
-	c.stopOnce.Do(func() { close(c.done) })
+	c.stopOnce.Do(func() {
+		c.tokenMu.Lock()
+		close(c.done)
+		if c.lifeCancel != nil {
+			c.lifeCancel()
+		}
+		c.closeSignaling()
+		c.tokenMu.Unlock()
+	})
+	c.wg.Wait()
 }
 
 // ── REST: peers, heartbeat ───────────────────────────────────────────────────
@@ -153,15 +212,20 @@ func (c *hubClient) stop() {
 // refreshPeers pulls GET /api/machines/peers and rebuilds the Directory cache
 // (fingerprint + endpoints, full replace).
 func (c *hubClient) refreshPeers(ctx context.Context) error {
+	c.tokenMu.RLock()
+	token, generation := c.tok, c.generation
+	c.tokenMu.RUnlock()
 	u := c.httpBase + "/api/machines/peers?machineId=" + url.QueryEscape(c.machineID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return err
 	}
-	c.authorize(req)
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("fetch peers: %w", err)
+		return fmt.Errorf("fetch peers: request failed or timed out")
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -175,6 +239,16 @@ func (c *hubClient) refreshPeers(ctx context.Context) error {
 	next := make(map[string]overlayPeer, len(peers))
 	for _, p := range peers {
 		next[p.ID] = overlayPeer{fingerprint: p.OverlayFingerprint, endpoints: p.OverlayEndpoints}
+	}
+	c.tokenMu.RLock()
+	defer c.tokenMu.RUnlock()
+	if generation != c.generation {
+		return nil
+	}
+	select {
+	case <-c.done:
+		return nil
+	default:
 	}
 	c.peerMu.Lock()
 	c.peerOverlay = next
@@ -253,129 +327,14 @@ func (c *hubClient) peerPollLoop(ctx context.Context) {
 		case <-c.done:
 			return
 		case <-ticker.C:
-			rc, cancel := context.WithTimeout(ctx, 10*time.Second)
-			if err := c.refreshPeers(rc); err != nil {
-				log.Printf("[mobile] peer refresh failed: %v", err)
-			}
-			cancel()
+		case <-c.peerRefresh:
 		}
-	}
-}
-
-// ── signaling WebSocket ──────────────────────────────────────────────────────
-
-// wsLoop keeps one signaling WS alive, reconnecting with capped backoff, until
-// ctx or Stop. The WS carries no machine-to-machine signaling anymore — its job
-// is presence: the Hub marks this phone online while the socket lives.
-func (c *hubClient) wsLoop(ctx context.Context) {
-	backoff := time.Second
-	const maxBackoff = 30 * time.Second
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-c.done:
-			return
-		default:
+		rc, cancel := context.WithTimeout(ctx, 10*time.Second)
+		if err := c.refreshPeers(rc); err != nil {
+			log.Printf("[mobile] peer refresh failed: %v", err)
 		}
-
-		if c.dialAndServe(ctx) {
-			backoff = time.Second // reset after a live connection
-		}
-
-		select {
-		case <-ctx.Done():
-			return
-		case <-c.done:
-			return
-		case <-time.After(backoff):
-		}
-		if backoff *= 2; backoff > maxBackoff {
-			backoff = maxBackoff
-		}
+		cancel()
 	}
-}
-
-// dialAndServe runs one WS connection to completion; established reports whether
-// the dial succeeded (so the caller can reset backoff).
-func (c *hubClient) dialAndServe(ctx context.Context) (established bool) {
-	dctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
-
-	dialer := &websocket.Dialer{HandshakeTimeout: 15 * time.Second}
-	hdr := http.Header{}
-	if t := c.token(); t != "" {
-		hdr.Set("Authorization", "Bearer "+t)
-	}
-	// The signaling URL carries the token as a query fallback (some proxies drop
-	// the Authorization header on Upgrade); the Hub validates it either way.
-	conn, _, err := dialer.DialContext(dctx, c.tokenizedWSURL(), hdr)
-	if err != nil {
-		log.Printf("[mobile] signaling dial failed: %v", err)
-		return false
-	}
-	defer conn.Close()
-
-	connDone := make(chan struct{})
-	go c.writePump(conn, connDone)
-	c.readPump(conn) // blocks until the connection breaks
-	close(connDone)
-	return true
-}
-
-func (c *hubClient) readPump(conn *websocket.Conn) {
-	conn.SetReadDeadline(time.Now().Add(90 * time.Second))
-	conn.SetPongHandler(func(string) error {
-		conn.SetReadDeadline(time.Now().Add(90 * time.Second))
-		return nil
-	})
-	conn.SetPingHandler(func(appData string) error {
-		conn.SetReadDeadline(time.Now().Add(90 * time.Second))
-		_ = conn.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(10*time.Second))
-		return nil
-	})
-	for {
-		_, data, err := conn.ReadMessage()
-		if err != nil {
-			return
-		}
-		var msg signalMessage
-		if err := json.Unmarshal(data, &msg); err != nil {
-			continue
-		}
-		_ = msg // presence / relay-data: the phone ignores every inbound type.
-	}
-}
-
-func (c *hubClient) writePump(conn *websocket.Conn, connDone <-chan struct{}) {
-	ticker := time.NewTicker(30 * time.Second)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-connDone:
-			return
-		case <-c.done:
-			return
-		case <-ticker.C:
-			conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-			if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
-				return
-			}
-		}
-	}
-}
-
-// tokenizedWSURL appends the current token as a query param fallback.
-func (c *hubClient) tokenizedWSURL() string {
-	t := c.token()
-	if t == "" {
-		return c.wsURL
-	}
-	sep := "&"
-	if !strings.Contains(c.wsURL, "?") {
-		sep = "?"
-	}
-	return c.wsURL + sep + "token=" + url.QueryEscape(t)
 }
 
 // ── URL helpers (stdlib only) ────────────────────────────────────────────────

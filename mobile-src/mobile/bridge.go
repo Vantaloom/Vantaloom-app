@@ -54,9 +54,10 @@ type Bridge struct {
 	proxy  *loomnet.LoopbackProxy
 	warm   *http.Client // over node.Transport(), for the Connect warm-up dial
 
-	state string // "idle" | "connecting" | "connected" | "error"
-	path  string // "direct" (last established), for status
-	err   string // last error message, for status
+	connectSeq uint64 // rejects completions from a stopped/disconnected Connect
+	state      string // "idle" | "connecting" | "connected" | "error"
+	path       string // "direct" (last established), for status
+	err        string // last error message, for status
 }
 
 // NewBridge returns an idle Bridge. Call StartNode before Connect.
@@ -113,8 +114,10 @@ func (b *Bridge) StartNode(dataDir, hubBaseURL, machineID, hubToken string) erro
 		cancel()
 		return err
 	}
+	hub.bindNode(node)
 	if err := node.Start(ctx); err != nil {
 		cancel()
+		node.Stop()
 		return err
 	}
 
@@ -156,37 +159,49 @@ func (b *Bridge) LoopbackPort() int {
 // error only when the overlay cannot reach the peer at all (dial failure across
 // all tiers); any HTTP status from the peer counts as connected.
 func (b *Bridge) Connect(machineID string) error {
-	b.mu.Lock()
-	node, warm := b.node, b.warm
-	b.mu.Unlock()
-	if node == nil {
-		return errors.New("mobile: node not started")
-	}
 	if strings.TrimSpace(machineID) == "" {
 		return errors.New("mobile: machineID is required")
 	}
-
+	b.mu.Lock()
+	node, warm, hub, root := b.node, b.warm, b.hub, b.ctx
+	if node == nil {
+		b.mu.Unlock()
+		return errors.New("mobile: node not started")
+	}
+	b.connectSeq++
+	seq := b.connectSeq
 	b.currentTarget.Store(machineID)
-	b.setState("connecting", "", "")
+	b.state, b.path, b.err = "connecting", "", ""
+	b.mu.Unlock()
+	complete := func(state, path, message string) {
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		if b.node == node && b.connectSeq == seq {
+			b.state, b.path, b.err = state, path, message
+		}
+	}
 
 	// Warm the dial ladder with a lightweight request. A transport-level error
 	// means every tier failed to reach the peer; any HTTP response (even 404)
 	// means a session is up.
-	ctx, cancel := context.WithTimeout(b.rootCtx(), 12*time.Second)
+	if hub != nil {
+		hub.waitConfig(root)
+	}
+	ctx, cancel := context.WithTimeout(root, connectBudget(node))
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodHead, "http://"+machineID+".loom/", nil)
 	if err != nil {
-		b.setState("error", "", err.Error())
+		complete("error", "", err.Error())
 		return err
 	}
 	resp, err := warm.Do(req)
 	if err != nil {
-		b.setState("error", "", err.Error())
+		complete("error", "", err.Error())
 		return err
 	}
 	_ = resp.Body.Close()
 
-	b.setState("connected", node.LastPath(machineID), "")
+	complete("connected", node.LastPath(machineID), "")
 	return nil
 }
 
@@ -194,8 +209,11 @@ func (b *Bridge) Connect(machineID string) error {
 // and cached sessions stay up (a later Connect reuses them); use Stop to tear the
 // node down.
 func (b *Bridge) Disconnect() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.connectSeq++
 	b.currentTarget.Store("")
-	b.setState("idle", "", "")
+	b.state, b.path, b.err = "idle", "", ""
 	return nil
 }
 
@@ -208,15 +226,27 @@ func (b *Bridge) Disconnect() error {
 func (b *Bridge) StatusJSON() string {
 	b.mu.Lock()
 	state, path, errMsg := b.state, b.path, b.err
-	node := b.node
+	node, hub := b.node, b.hub
 	b.mu.Unlock()
 
 	out := struct {
-		State string `json:"state"`
-		Path  string `json:"path,omitempty"`
-		Error string `json:"error,omitempty"`
-		LanIP string `json:"lanIp,omitempty"`
-	}{State: state}
+		State              string      `json:"state"`
+		Path               string      `json:"path,omitempty"`
+		Error              string      `json:"error,omitempty"`
+		LanIP              string      `json:"lanIp,omitempty"`
+		Methods            []string    `json:"methods"`
+		Relay              relayStatus `json:"relay"`
+		SignalingConnected bool        `json:"signalingConnected"`
+	}{State: state, Methods: []string{}, Relay: relayStatus{StunAddrs: []string{}}}
+	if hub != nil {
+		out.Relay = hub.relayDiagnostics()
+		out.SignalingConnected = hub.signalingConnected()
+	}
+	if node != nil {
+		for _, method := range node.Registry.Methods() {
+			out.Methods = append(out.Methods, method.Name())
+		}
+	}
 	if state == "connected" {
 		out.Path = path
 	}
@@ -264,11 +294,15 @@ func (b *Bridge) SetToken(token string) {
 // the root context. The Bridge can be re-used by calling StartNode again.
 func (b *Bridge) Stop() {
 	b.mu.Lock()
+	defer b.mu.Unlock() // serialize teardown with a subsequent StartNode
 	proxy, node, hub, cancel := b.proxy, b.node, b.hub, b.cancel
 	b.proxy, b.node, b.hub, b.cancel, b.ctx = nil, nil, nil, nil, nil
 	b.warm = nil
+	b.connectSeq++
 	b.state, b.path, b.err = "idle", "", ""
-	b.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 
 	b.currentTarget.Store("")
 	if proxy != nil {

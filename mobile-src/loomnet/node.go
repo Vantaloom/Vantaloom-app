@@ -434,7 +434,7 @@ func (n *Node) SetReverseRequester(fn func(ctx context.Context, peerID string) e
 // 懒重建读取新值），punch/relay dialer 只注册一次、serveRelay 只启动一次
 // （DialerRegistry.Register 是 append，重复注册会重复尝试）。
 // 并发安全：opts.RelayConfig 的写与 relayClient()/RelayConfig() 的读都持
-// relayMu（dialer 在拨号前的直读沿用既有语义，见 relayDialer/punchDialer）。
+// relayMu；dialer 必须通过 RelayConfig() 取得快照，不能无锁直读 opts。
 func (n *Node) SetRelayConfig(rc *RelayConfig) {
 	n.relayMu.Lock()
 	n.opts.RelayConfig = rc

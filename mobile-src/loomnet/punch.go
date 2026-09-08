@@ -73,7 +73,7 @@ func (d *punchDialer) Explain(_ context.Context, peerID string) (bool, string) {
 	if prefs := d.n.ConnectionPrefs(); !prefs.P2PEnabled() {
 		return false, "账号「连接偏好」已关闭 P2P 穿透。"
 	}
-	rc := d.n.opts.RelayConfig
+	rc := d.n.RelayConfig()
 	if rc == nil || len(rc.StunAddrs) == 0 {
 		return false, "打洞未启用（未配置 STUN 观测点）。打洞需要 Hub 提供 STUN 服务用于 NAT 类型探测。"
 	}
@@ -100,7 +100,7 @@ func (d *punchDialer) Explain(_ context.Context, peerID string) (bool, string) {
 }
 
 func (d *punchDialer) Dial(ctx context.Context, peerID string) (Session, error) {
-	rc := d.n.opts.RelayConfig
+	rc := d.n.RelayConfig()
 	if rc == nil || len(rc.StunAddrs) == 0 {
 		return nil, errors.New("loomnet: punch: STUN 观测点未配置")
 	}
@@ -301,7 +301,7 @@ func punchHole(ctx context.Context, conn *net.UDPConn, peerAddr *net.UDPAddr) er
 // 注意：B 侧的 quic.Listen 和打洞包接收都在独立 socket 上，独立 socket 的生命
 // 周期必须延续到 QUIC 连接建立后——由 acceptPunchQUIC goroutine 持有。
 func (n *Node) HandlePunchOfferB(fromMachineID, offerAddr string) (string, error) {
-	rc := n.opts.RelayConfig
+	rc := n.RelayConfig()
 	if rc == nil || len(rc.StunAddrs) == 0 {
 		return "", errors.New("本机未启用打洞")
 	}
