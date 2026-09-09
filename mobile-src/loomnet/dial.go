@@ -49,7 +49,7 @@ func (n *Node) getOrDialConn(ctx context.Context, machineID string) (Session, er
 	if s := n.cachedConn(machineID); s != nil {
 		return s, nil
 	}
-	return n.dials.do(machineID, func() (Session, error) {
+	return n.dials.doContext(ctx, machineID, func() (Session, error) {
 		// Re-check the cache: a concurrent flight may have just populated it.
 		if s := n.cachedConn(machineID); s != nil {
 			return s, nil
@@ -418,6 +418,11 @@ func (n *Node) watchConn(machineID string, s Session, done <-chan struct{}) {
 	case <-n.ctx.Done():
 	}
 	n.evictConn(machineID, s)
+	// A QUIC connection's death does not close an independently-owned Transport.
+	// Idempotent Close also releases punched sessions constructed by older paths.
+	if ps, ok := s.(*punchSession); ok {
+		_ = ps.Close()
+	}
 }
 
 // evictConn removes a session from the cache if it is still the current one.
@@ -445,14 +450,29 @@ type dialCall struct {
 // do runs fn for key, ensuring concurrent callers for the same key share one
 // execution and its result.
 func (g *dialGroup) do(key string, fn func() (Session, error)) (Session, error) {
+	return g.doContext(context.Background(), key, fn)
+}
+
+// A follower owns only its wait, never the leader's connection or cancellation.
+func (g *dialGroup) doContext(ctx context.Context, key string, fn func() (Session, error)) (Session, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	g.mu.Lock()
 	if g.inflight == nil {
 		g.inflight = map[string]*dialCall{}
 	}
 	if c, ok := g.inflight[key]; ok {
 		g.mu.Unlock()
-		<-c.done
-		return c.s, c.err
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-c.done:
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			return c.s, c.err
+		}
 	}
 	c := &dialCall{done: make(chan struct{})}
 	g.inflight[key] = c

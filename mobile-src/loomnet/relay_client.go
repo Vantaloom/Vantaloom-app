@@ -511,9 +511,25 @@ func (c *relayClient) connectWSS(ctx context.Context) (*websocket.Conn, error) {
 	return ws, nil
 }
 
+// relayPeerRejected 是中继对**目标机器**的裁决（OPEN-ERR：不在线 / 没接受）。
+// 它是在一条**已经握手成功、正在正常收发**的控制连接上收到的，所以它恰好证明
+// 我们这一侧是好的——绝不能拿它去重置控制连接。两条传输（QUIC 与 WSS）都返回
+// 这个类型；判据只有 peerRejected 一处。
+type relayPeerRejected struct{ reason string }
+
+func (e *relayPeerRejected) Error() string {
+	return "loomnet/relay: 电路建立失败：" + e.reason
+}
+
+// peerRejected 报告一个错误是否是「目标机器的问题」而不是「我们的连接的问题」。
+func peerRejected(err error) bool {
+	var rejected *relayPeerRejected
+	return errors.As(err, &rejected)
+}
+
 // openCircuit 开一条电路流，发 OPEN，等待字节管道就绪或 OPEN-ERR。返回的
-// net.Conn 是已配对的字节管道（中继把 A↔B 两条流对拼）。连接断开时自动重连
-// 并重试一次。
+// net.Conn 是已配对的字节管道（中继把 A↔B 两条流对拼）。**连接**断开时自动重连
+// 并重试一次；目标机器的裁决（OPEN-ERR）直接上抛，不重置也不重试。
 func (c *relayClient) openCircuit(ctx context.Context, targetMachineID string) (net.Conn, error) {
 	if err := c.ensureConnected(ctx); err != nil {
 		return nil, err
@@ -522,6 +538,19 @@ func (c *relayClient) openCircuit(ctx context.Context, targetMachineID string) (
 	pipe, err := c.tryOpenCircuit(ctx, targetMachineID)
 	if err == nil {
 		return pipe, nil
+	}
+	// 中继在**健康的控制连接上**回的 OPEN-ERR（「目标机器不在线」/「等待被叫方
+	// 接受超时」）是关于**目标机器**的裁决，不是我们这条控制连接的故障——收到它
+	// 本身就证明连接是通的。重置只该用在「连接可能已断开」上。
+	//
+	// 这条分类修的是一次线上事故：控制连接是**全账号共享**的（serveRelay 的
+	// INCOMING 监听也骑在它上面），而界面会周期性地对**离线**机器发跨机请求。
+	// 每次失败都 reset 之后，日志里是每 4 秒一轮「电路建立失败，重置连接后
+	// 重试」，于是一台离线机器把健康 peer 的中继路径一起打断，跨机往返从
+	// 162ms 涨到 5.7s、23.6s；重连期间本机也短暂收不到别人经中继拨进来的
+	// INCOMING。除此之外这次重试还把一次注定失败的拨号的耗时翻倍。
+	if peerRejected(err) {
+		return nil, err
 	}
 	// 连接可能已断开，重置后重试一次。
 	log.Printf("[loomnet/relay] 电路建立失败，重置连接后重试：%v", err)
@@ -611,7 +640,7 @@ func awaitCircuitReady(ctx context.Context, br *bufio.Reader, stream *quic.Strea
 		stream.SetReadDeadline(time.Time{})
 		return &bufferedStreamConn{br: br, stream: stream}, nil
 	case "OPEN-ERR":
-		return nil, fmt.Errorf("loomnet/relay: 电路建立失败：%s", msg.Reason)
+		return nil, &relayPeerRejected{reason: msg.Reason}
 	default:
 		return nil, fmt.Errorf("loomnet/relay: 收到意外消息类型 %q（预期 OPEN-OK 或 OPEN-ERR）", msg.Type)
 	}
@@ -698,7 +727,7 @@ func awaitWSSCircuitReady(ctx context.Context, ws *websocket.Conn) (net.Conn, er
 		return &wsConn{ws: ws}, nil
 	case "OPEN-ERR":
 		ws.Close()
-		return nil, fmt.Errorf("loomnet/relay: 电路建立失败：%s", msg.Reason)
+		return nil, &relayPeerRejected{reason: msg.Reason}
 	default:
 		ws.Close()
 		return nil, fmt.Errorf("loomnet/relay: WSS 收到意外消息类型 %q（预期 OPEN-OK 或 OPEN-ERR）", msg.Type)

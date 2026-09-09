@@ -1,12 +1,9 @@
 package loomnet
 
-// NAT 类型探测 + STUN binding 客户端（阶段2 P2P 打洞前置）。
-//
-// 从 overlay 共享 UDP socket 发 STUN Binding Request 到两个 STUN 观测点，
-// 对比返回的 XOR-MAPPED-ADDRESS（reflexive 公网 IP:port）：
-//   - 两次 reflexive port 相同 → cone NAT（可打洞）
-//   - 两次 reflexive port 不同 → symmetric NAT（打洞必败，降级中继）
-//
+// NAT mapping observations on a dedicated, pre-QUIC UDP socket. Different
+// mappings demonstrate destination dependence; equal mappings (especially two
+// ports on one server IP) do NOT establish filtering behavior or punchability.
+// QUIC+mTLS, not this classification, proves connectivity.
 // STUN 协议（RFC 5389 子集）：20 字节 header（2 type + 2 length + 4 magic +
 // 12 txn id），Binding Request type=0x0001 length=0。响应含 XOR-MAPPED-ADDRESS
 // 属性（type=0x0020），port^magicHi16 / ip^magic 防 NAT 重写。
@@ -22,23 +19,23 @@ import (
 )
 
 const (
-	stunMagic     = 0x2112A442
-	stunTypeReq   = 0x0001
-	stunTypeResp  = 0x0101
-	stunAttrXor   = 0x0020
-	stunHdrLen    = 20
-	stunFamily4   = 0x01
-	stunTimeout   = 5 * time.Second
+	stunMagic    = 0x2112A442
+	stunTypeReq  = 0x0001
+	stunTypeResp = 0x0101
+	stunAttrXor  = 0x0020
+	stunHdrLen   = 20
+	stunFamily4  = 0x01
+	stunTimeout  = 5 * time.Second
 )
 
 // NATType 是探测到的 NAT 类型。
 type NATType int
 
 const (
-	NATUnknown   NATType = iota // 探测失败（STUN 不可达）
-	NATCone                     // cone NAT（full-cone/restricted-cone/port-restricted），可打洞
-	NATSymmetric                // symmetric NAT，打洞必败
-	NATOpen                     // 无 NAT（reflexive == local），直连可达
+	NATUnknown   NATType = iota // 映射/过滤行为证据不足；仍可尝试 QUIC
+	NATCone                     // legacy enum; basic binding probes cannot prove cone filtering
+	NATSymmetric                // 已观察到目标相关映射，不代表所有方向必败
+	NATOpen                     // reflexive == local，未证明入站过滤放行
 )
 
 func (t NATType) String() string {
@@ -48,9 +45,9 @@ func (t NATType) String() string {
 	case NATSymmetric:
 		return "symmetric NAT"
 	case NATOpen:
-		return "无 NAT（公网直连）"
+		return "本地与反射地址相同（入站可达性未验证）"
 	default:
-		return "未知"
+		return "未知（映射/过滤行为证据不足）"
 	}
 }
 
@@ -62,10 +59,8 @@ type ReflexiveInfo struct {
 	ReflexivePort int
 }
 
-// probeNAT 从 overlay UDP socket 发 STUN 到两个观测点，判定 NAT 类型并返回
-// reflexive 公网地址。conn 是 overlay 共享 UDP socket（打洞要复用它）。
-// stunAddrs 至少 2 个；只有 1 个时无法区分 cone/symmetric，按 cone 处理（打洞
-// 时直接尝试，失败由超时兜底）。
+// probeNAT uses a dedicated socket before QUIC owns its reads. One successful
+// observation still yields a candidate, but never a fabricated cone verdict.
 func probeNAT(ctx context.Context, conn *net.UDPConn, stunAddrs []string) (ReflexiveInfo, error) {
 	if len(stunAddrs) == 0 {
 		return ReflexiveInfo{NATType: NATUnknown}, errors.New("loomnet/nat: 无 STUN 观测点")
@@ -77,19 +72,19 @@ func probeNAT(ctx context.Context, conn *net.UDPConn, stunAddrs []string) (Refle
 		return ReflexiveInfo{NATType: NATUnknown}, fmt.Errorf("STUN 探测 %s: %w", stunAddrs[0], err)
 	}
 
-	// 只有一个观测点：无法区分 NAT 类型，按 cone 处理（打洞超时兜底）
+	// 单点成功只提供候选，不能推导 NAT 类型。
 	if len(stunAddrs) == 1 {
-		return classifyNAT(conn, r1, r1), nil
+		return classifyNAT(conn, r1, nil), ctx.Err()
 	}
 
 	// 探测第二个观测点
 	r2, err := stunBinding(ctx, conn, stunAddrs[1])
 	if err != nil {
-		// 第二观测点不可达：用第一观测点的结果，按 cone 处理（保守）
-		return classifyNAT(conn, r1, r1), nil
+		// 第二点失败可保留候选；父 context 结束则不能继续发 offer。
+		return classifyNAT(conn, r1, nil), ctx.Err()
 	}
 
-	return classifyNAT(conn, r1, r2), nil
+	return classifyNAT(conn, r1, r2), ctx.Err()
 }
 
 // classifyNAT 对比两次 reflexive 地址判定 NAT 类型。
@@ -99,9 +94,9 @@ func classifyNAT(conn *net.UDPConn, r1, r2 *net.UDPAddr) ReflexiveInfo {
 	if r1.IP.Equal(local.IP) && r1.Port == local.Port {
 		return ReflexiveInfo{NATType: NATOpen, ReflexiveIP: r1.IP, ReflexivePort: r1.Port}
 	}
-	// 两次 reflexive port 相同 → cone NAT；不同 → symmetric
-	if r1.Port == r2.Port && r1.IP.Equal(r2.IP) {
-		return ReflexiveInfo{NATType: NATCone, ReflexiveIP: r1.IP, ReflexivePort: r1.Port}
+	// Equal mappings cannot distinguish address-dependent mapping or filtering.
+	if r2 == nil || (r1.Port == r2.Port && r1.IP.Equal(r2.IP)) {
+		return ReflexiveInfo{NATType: NATUnknown, ReflexiveIP: r1.IP, ReflexivePort: r1.Port}
 	}
 	return ReflexiveInfo{NATType: NATSymmetric, ReflexiveIP: r1.IP, ReflexivePort: r1.Port}
 }
@@ -109,9 +104,19 @@ func classifyNAT(conn *net.UDPConn, r1, r2 *net.UDPAddr) ReflexiveInfo {
 // stunBinding 从 conn 发 STUN Binding Request 到 stunAddr，等待 Binding Response，
 // 解析 XOR-MAPPED-ADDRESS 返回 reflexive 公网地址。
 func stunBinding(ctx context.Context, conn *net.UDPConn, stunAddr string) (*net.UDPAddr, error) {
-	addr, err := net.ResolveUDPAddr("udp", stunAddr)
+	// The per-point budget includes name resolution, not only socket reads.
+	ctx, cancel := context.WithTimeout(ctx, stunTimeout)
+	defer cancel()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	addrs, err := publicCandidates(ctx, stunAddr)
 	if err != nil {
 		return nil, fmt.Errorf("解析 STUN 地址 %q: %w", stunAddr, err)
+	}
+	addr, err := stunIPv4Candidate(addrs)
+	if err != nil {
+		return nil, fmt.Errorf("STUN 地址 %q: %w", stunAddr, err)
 	}
 
 	// 构造 Binding Request：type=0x0001, length=0, magic, 12 字节随机 txn id
@@ -124,13 +129,27 @@ func stunBinding(ctx context.Context, conn *net.UDPConn, stunAddr string) (*net.
 		return nil, fmt.Errorf("生成 txn id: %w", err)
 	}
 
-	// 设置读写超时（STUN 是无状态一问一答）
-	deadline, ok := ctx.Deadline()
-	if !ok {
-		deadline = time.Now().Add(stunTimeout)
+	// min(parent deadline, 5s); cancellation wakes the blocking read promptly.
+	// Join the callback BEFORE clearing deadlines/handing this socket to QUIC.
+	deadline := time.Now().Add(stunTimeout)
+	if parent, ok := ctx.Deadline(); ok && parent.Before(deadline) {
+		deadline = parent
 	}
-	_ = conn.SetReadDeadline(deadline)
-	defer conn.SetReadDeadline(time.Time{})
+	_ = conn.SetDeadline(deadline)
+	wakeDone := make(chan struct{})
+	stopWake := context.AfterFunc(ctx, func() {
+		_ = conn.SetDeadline(time.Now())
+		close(wakeDone)
+	})
+	defer func() {
+		if !stopWake() {
+			<-wakeDone
+		}
+		_ = conn.SetDeadline(time.Time{})
+	}()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	if _, err := conn.WriteToUDP(req, addr); err != nil {
 		return nil, fmt.Errorf("发送 STUN 请求: %w", err)
@@ -165,6 +184,18 @@ func stunBinding(ctx context.Context, conn *net.UDPConn, stunAddr string) (*net.
 		_ = raddr // STUN 响应来源不是 reflexive 地址（是 STUN 服务器地址）
 		return reflexive, nil
 	}
+}
+
+// stunIPv4Candidate is STUN-specific: this binding parser only supports IPv4
+// XOR-MAPPED-ADDRESS. DNS may list AAAA before A; generic QUIC candidates must
+// remain dual-stack, so restrict the family here rather than in publicCandidates.
+func stunIPv4Candidate(addrs []*net.UDPAddr) (*net.UDPAddr, error) {
+	for _, addr := range addrs {
+		if addr != nil && addr.IP.To4() != nil {
+			return addr, nil
+		}
+	}
+	return nil, errors.New("不支持 IPv6-only STUN 观测点（需要 IPv4 地址）")
 }
 
 // isSTUNResp 判断是否为 STUN Binding Success Response（type=0x0101）。

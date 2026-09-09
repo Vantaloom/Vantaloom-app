@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"sync"
 
 	quic "github.com/quic-go/quic-go"
 )
@@ -69,19 +70,40 @@ func (s *quicSession) Close() error {
 // 关闭——Close 时先关 QUIC 连接，再关 transport 和 UDP socket。
 type punchSession struct {
 	*quicSession
-	qt   *quic.Transport
-	conn *net.UDPConn
+	qt        *quic.Transport
+	conn      *net.UDPConn
+	closeOnce sync.Once
+	closeErr  error
+}
+
+// A punch owns a transport/socket even when it is no longer the cache winner.
+// Watch its own lifetime, not cache membership: replacement must neither leak
+// it on natural death nor interrupt a healthy predecessor's active streams.
+func newPunchSession(owner context.Context, qs *quicSession, qt *quic.Transport, conn *net.UDPConn) *punchSession {
+	s := &punchSession{quicSession: qs, qt: qt, conn: conn}
+	go func() {
+		select {
+		case <-qs.conn.Context().Done():
+		case <-owner.Done():
+		}
+		_ = s.Close()
+	}()
+	return s
 }
 
 func (s *punchSession) Close() error {
-	err := s.quicSession.Close()
-	if s.qt != nil {
-		s.qt.Close()
-	}
-	if s.conn != nil {
-		s.conn.Close()
-	}
-	return err
+	s.closeOnce.Do(func() {
+		if s.quicSession != nil {
+			s.closeErr = s.quicSession.Close()
+		}
+		if s.qt != nil {
+			_ = s.qt.Close()
+		}
+		if s.conn != nil {
+			_ = s.conn.Close()
+		}
+	})
+	return s.closeErr
 }
 
 // RemoteAddr 透传到内层 quicSession（拓扑分类用）。

@@ -255,6 +255,9 @@ func (d *rendezvousDialer) Available(ctx context.Context, peerID string) bool {
 }
 
 func (d *rendezvousDialer) Explain(_ context.Context, peerID string) (bool, string) {
+	if d.n.peerKnownOffline(peerID) {
+		return false, offlinePeerReason
+	}
 	if _, ok := d.n.rendezvousCoords(); !ok {
 		return false, "中继坐标不可用（Hub 不可达或中继未启用），无法经会合连接临时设备。"
 	}

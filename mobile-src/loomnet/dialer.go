@@ -312,6 +312,9 @@ func (d *reverseDialer) Available(ctx context.Context, peerID string) bool {
 }
 
 func (d *reverseDialer) Explain(_ context.Context, peerID string) (bool, string) {
+	if d.n.peerKnownOffline(peerID) {
+		return false, offlinePeerReason
+	}
 	if prefs := d.n.ConnectionPrefs(); !prefs.DirectEnabled() {
 		return false, "账号「连接偏好」已关闭直接连接（局域网/公网/反向直连）。"
 	}
@@ -420,6 +423,9 @@ func (d *relayDialer) Available(ctx context.Context, peerID string) bool {
 }
 
 func (d *relayDialer) Explain(_ context.Context, peerID string) (bool, string) {
+	if d.n.peerKnownOffline(peerID) {
+		return false, offlinePeerReason
+	}
 	if prefs := d.n.ConnectionPrefs(); !prefs.RelayEnabled() {
 		return false, "账号「连接偏好」已关闭服务器中继。"
 	}

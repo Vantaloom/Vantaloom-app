@@ -1037,6 +1037,8 @@ func (n *Node) serveHandler() http.Handler {
 			return
 		}
 		if n.inboundTrusted(id, fp) {
+			peer := AuthenticatedPeer{MachineID: id, Fingerprint: fp, valid: func() bool { return n.inboundTrusted(id, fp) }}
+			r = r.WithContext(context.WithValue(r.Context(), authenticatedPeerKey{}, peer))
 			r.Header.Set(headerLoomFrom, id)
 			r.Header.Set(headerLoomFp, fp)
 			n.opts.LocalHandler.ServeHTTP(w, r)

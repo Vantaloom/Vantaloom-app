@@ -142,6 +142,9 @@ func (p *LoopbackProxy) proxyHTTP(w http.ResponseWriter, r *http.Request, outURL
 
 	copyLoopbackHeader(w.Header(), resp.Header, false)
 	w.WriteHeader(resp.StatusCode)
+	if strings.EqualFold(strings.TrimSpace(strings.SplitN(resp.Header.Get("Content-Type"), ";", 2)[0]), "text/event-stream") {
+		_ = http.NewResponseController(w).Flush()
+	}
 	flushLoopbackStream(w, resp.Body)
 }
 
