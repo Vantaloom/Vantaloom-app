@@ -438,6 +438,13 @@ func (n *Node) SetReverseRequester(fn func(ctx context.Context, peerID string) e
 func (n *Node) SetRelayConfig(rc *RelayConfig) {
 	n.relayMu.Lock()
 	n.opts.RelayConfig = rc
+	// Retire credentials immediately: serveRelay may be blocked on the old
+	// connection and cannot call relayClient() to notice a logout or token swap.
+	if n.relay != nil && (rc == nil || n.relayCfgFp != rc.Fingerprint()) {
+		n.relay.close()
+		n.relay = nil
+		n.relayCfgFp = ""
+	}
 	// 中继配置携带的偏好（旧通道）同步进独立字段，否则 SetConnectionPrefs
 	// 注入过一次之后，relay 带来的新偏好会被那个字段永久遮蔽。
 	if rc != nil && rc.ConnectionPrefs != nil {

@@ -94,6 +94,33 @@ class LocalRuntimeStateTest {
         }
     }
 
+    @Test
+    fun authorizationTracksLiveEndpointRotationAndNeverReturnsCachedCapabilitiesAfterStop() {
+        val raw = "http://127.0.0.1:9137/v1/files/raw?path=video.mp4"
+        val key = "a".repeat(64)
+        setState(FakeProcess(alive = true), 9137, "c".repeat(64), key)
+        try {
+            val first = LocalRuntime.authorizeLocalRuntimeUrl(raw)
+            assertTrue(first != raw)
+            assertEquals(first, LocalRuntime.authorizeLocalRuntimeUrl(raw))
+            setState(FakeProcess(alive = true), 9137, "c".repeat(64), "b".repeat(64))
+            assertTrue(first != LocalRuntime.authorizeLocalRuntimeUrl(raw))
+            setState(FakeProcess(alive = true), 9138, "c".repeat(64), key)
+            assertEquals(raw, LocalRuntime.authorizeLocalRuntimeUrl(raw))
+            val nextPort = raw.replace(":9137", ":9138")
+            assertTrue(nextPort != LocalRuntime.authorizeLocalRuntimeUrl(nextPort))
+            LocalRuntime.requestStop()
+            assertEquals(nextPort, LocalRuntime.authorizeLocalRuntimeUrl(nextPort))
+            setState(FakeProcess(alive = false), 9137, "c".repeat(64), key)
+            assertEquals(raw, LocalRuntime.authorizeLocalRuntimeUrl(raw))
+            setState(null, 0, null, null)
+            assertEquals(raw, LocalRuntime.authorizeLocalRuntimeUrl(raw))
+        } finally {
+            LocalRuntime.stop()
+            setState(null, 0, null, null)
+        }
+    }
+
     private fun setState(
         process: Process?,
         port: Int,

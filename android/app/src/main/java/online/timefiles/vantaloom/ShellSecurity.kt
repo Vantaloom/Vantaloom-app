@@ -190,3 +190,59 @@ internal object LoopbackCapabilitySigner {
         encoded
     }.getOrNull()
 }
+
+/** Bounded process-credential cache: retain the exact URL so repeated renders do not reload media. */
+internal class LoopbackCapabilityUrlCache(private val capacity: Int = 256) {
+    private data class Entry(val url: String, val expires: Long)
+    private var endpointPort = 0
+    private var endpointKey: String? = null
+    private val entries = LinkedHashMap<String, Entry>(16, 0.75f, true)
+
+    init { require(capacity > 0) }
+
+    @Synchronized
+    fun clear() {
+        entries.clear()
+        endpointPort = 0
+        endpointKey = null
+    }
+
+    @Synchronized
+    fun authorize(
+        raw: String,
+        port: Int,
+        capabilityKey: String,
+        nowUnixSeconds: Long = System.currentTimeMillis() / 1000,
+    ): String? {
+        if (endpointPort != port || endpointKey != capabilityKey) {
+            clear()
+            endpointPort = port
+            endpointKey = capabilityKey
+        }
+        entries[raw]?.let { entry ->
+            val remaining = runCatching { Math.subtractExact(entry.expires, nowUnixSeconds) }.getOrNull()
+            // Go rejects expirations beyond 12h + 5min. Refresh after a large clock rollback,
+            // and before expiry; never slide the expiration on a normal cache hit.
+            if (remaining != null && remaining > REFRESH_MARGIN_SECONDS &&
+                remaining <= TTL_SECONDS + CLOCK_SKEW_SECONDS
+            ) return entry.url
+            entries.remove(raw)
+        }
+        val signed = LoopbackCapabilitySigner.authorize(raw, port, capabilityKey, nowUnixSeconds)
+            ?: return null
+        val expires = Math.addExact(nowUnixSeconds, TTL_SECONDS)
+        entries[raw] = Entry(signed, expires)
+        if (entries.size > capacity) {
+            val iterator = entries.entries.iterator()
+            iterator.next()
+            iterator.remove()
+        }
+        return signed
+    }
+
+    private companion object {
+        const val TTL_SECONDS = 12 * 60 * 60L
+        const val REFRESH_MARGIN_SECONDS = 5 * 60L
+        const val CLOCK_SKEW_SECONDS = 5 * 60L
+    }
+}

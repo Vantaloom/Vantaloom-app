@@ -35,6 +35,7 @@ import org.json.JSONObject
 object LocalRuntime {
     private const val TAG = "VantaloomRuntime"
     private const val LOOPBACK_CREDENTIAL_MODE = 384 // 0600
+    private val capabilityUrls = LoopbackCapabilityUrlCache()
 
     @Volatile private var process: Process? = null
     @Volatile private var port: Int = 0
@@ -65,6 +66,7 @@ object LocalRuntime {
             return Endpoint(port, existingToken, existingCapability)
         }
         existing?.destroy()
+        capabilityUrls.clear()
         process = null
         port = 0
         bearerToken = null
@@ -162,6 +164,7 @@ object LocalRuntime {
         } finally {
             val cleanupFailure = credentialsFile?.let(::deleteLoopbackCredentialsFile)
             if (!launchCompleted || cleanupFailure != null) {
+                capabilityUrls.clear()
                 launchedProcess?.destroy()
                 if (process === launchedProcess) {
                     process = null
@@ -183,6 +186,7 @@ object LocalRuntime {
 
     fun requestStop() {
         stopRequested = true
+        capabilityUrls.clear()
         process?.destroy()
     }
 
@@ -219,16 +223,20 @@ object LocalRuntime {
             bearerToken = null
             capabilityToken = null
         }
+        capabilityUrls.clear()
         return null
     }
 
+    @Synchronized
     fun authorizeLocalRuntimeUrl(raw: String): String {
         val endpoint = currentEndpoint() ?: return raw
-        return LoopbackCapabilitySigner.authorize(
+        val signed = capabilityUrls.authorize(
             raw,
             endpoint.port,
             endpoint.capabilityToken,
         ) ?: raw
+        // requestStop deliberately does not take this monitor, so it can cancel startup.
+        return if (stopRequested) raw else signed
     }
 
     private fun probeHealth(candidate: Int, token: String): Boolean = try {
