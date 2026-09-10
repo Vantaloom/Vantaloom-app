@@ -1,7 +1,0 @@
-# 仓库在 Windows 上开发（core.autocrlf=true，且仓库根没有 .gitattributes）。
-# 容器里的 shell 脚本一旦带上 CRLF，shebang 会变成 "/bin/sh\r"，启动失败信息是
-# 毫无线索的 "no such file or directory"。这里把换行钉死成 LF。
-# （Dockerfile 里还有一道 sed 's/\r$//' 作为第二保险——两道都留着。）
-*.sh text eol=lf
-Dockerfile text eol=lf
-entrypoint.sh text eol=lf

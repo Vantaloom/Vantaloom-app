@@ -1,5 +1,0 @@
-# 构建上下文是 docker/ 目录，但镜像只需要 Dockerfile 与 entrypoint.sh。
-# 把其余文件挡在上下文之外：上下文越小，构建越快，也不会有人不小心把无关文件
-# COPY 进镜像。
-*
-!entrypoint.sh
