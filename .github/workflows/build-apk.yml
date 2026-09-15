@@ -340,9 +340,13 @@ jobs:
           SHA="$(git rev-parse --short HEAD)"
           TAG="apk-build${GITHUB_RUN_NUMBER}-${SHA}"
           APK="dist/${APK_NAME}"
+          # 版本号从 APK 自己报的那个真源现取，别在这里再写一份镜像——
+          # 上一份写死的 "0.14.33" 从 0.14.33 一路挂到了 0.16.63。
+          VER="$(sed -n 's/.*versionName = "\([^"]*\)".*/\1/p' android/app/build.gradle.kts | head -1)"
+          if [ -n "$VER" ]; then VERLINE="Vantaloom $VER Android local-first client."; else VERLINE="Vantaloom Android local-first client."; fi
           gh release create "$TAG" "$APK" \
             --target "$GITHUB_SHA" \
             --title "Vantaloom Android · build ${GITHUB_RUN_NUMBER} (${SHA})" \
-            --notes "Vantaloom 0.14.33 Android local-first client. The on-device agent shell now runs inside a real Debian-family Linux sandbox (proot + a rootfs downloaded on first use): apt/pip/git/compilers all work. Signed with the stable project release key for in-place upgrades." \
+            --notes "${VERLINE} The on-device agent shell runs inside a real Debian-family Linux sandbox (proot + a rootfs downloaded on first use): apt/pip/git/compilers all work. Signed with the stable project release key for in-place upgrades." \
             --latest
           echo "Released $TAG → $(basename "$APK")"
