@@ -68,6 +68,13 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          # 不能用 action 的默认 packages（"tools platform-tools"）：
+          # 旧的 SDK Tools 包 "tools" 已被 Google 从仓库下架，新版 cmdline-tools
+          # 解析不到它就 sdkmanager exit 1，整个构建死在第 5 步。下一步本来就会
+          # 显式装 platform-tools / NDK / platform / build-tools，这里只要它别去
+          # 要那个不存在的包。
+          packages: platform-tools
 
       - name: Install Android NDK + platform + build-tools
         run: |
