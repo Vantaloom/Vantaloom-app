@@ -203,6 +203,21 @@ class LoomJsBridge(
     }
 
     /**
+     * 从后台回来时踢 overlay 重连（信令 WS + 对端重热）。安卓切到后台一段时间后，
+     * QUIC 会话和信令连接可能已死，而 Go 对象仍以为自己是连着的。JS 侧无法探测
+     * QUIC 是否活着，所以前端 visibilitychange 切回时调这个方法让 Go 重新拨一次。
+     * 同步返回当前状态 JSON（同 statusJSON），异步重热在后台进行。
+     */
+    @JavascriptInterface
+    fun resume(): String {
+        return try {
+            Loom.get()?.resume() ?: """{"state":"idle"}"""
+        } catch (e: Throwable) {
+            """{"state":"error","error":"${e.message?.replace("\"", "'")}"}"""
+        }
+    }
+
+    /**
      * 图片选择（0.14.28 composer 加号键）：source = "camera" | "gallery"。壳侧
      * （MainActivity）拉起相机/Photo Picker，结果经 encodeImagesAsync 编码后
      * resolve {"images":[{dataUrl,name}]}；用户取消 = 空数组（不是错误）。

@@ -335,3 +335,58 @@ func (b *Bridge) rootCtx() context.Context {
 	}
 	return context.Background()
 }
+
+// Resume is the Android foreground hook. When the overlay activity returns from
+// background, the EventSource on the JS side is dead but the underlying overlay
+// node's QUIC session may also be dead while Go objects still think they're
+// connected. This kicks signaling reconnect, refreshes the peer directory, and
+// re-dials the current target (if any) so the next SSE request can succeed.
+//
+// Returns the current status JSON (same shape as StatusJSON).
+func (b *Bridge) Resume() string {
+	b.mu.Lock()
+	hub, node, warm, ctx := b.hub, b.node, b.warm, b.ctx
+	target, _ := b.currentTarget.Load().(string)
+	b.mu.Unlock()
+
+	// 1. Kick signaling reconnect + refresh peers (mirror iOS Resume logic).
+	if hub != nil {
+		select {
+		case hub.reconnect <- struct{}{}:
+		default:
+		}
+		select {
+		case hub.refresh <- struct{}{}:
+		default:
+		}
+	}
+
+	// 2. If a target is set, re-warm it in the background (15s).
+	if warm != nil && node != nil && ctx != nil && target != "" {
+		b.setState("connecting", "", "")
+		go func() {
+			dctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+			defer cancel()
+			req, err := http.NewRequestWithContext(dctx, http.MethodHead, "http://"+target+".loom/", nil)
+			if err != nil {
+				if ct, _ := b.currentTarget.Load().(string); ct == target {
+					b.setState("error", "", err.Error())
+				}
+				return
+			}
+			resp, err := warm.Do(req)
+			if err != nil {
+				if ct, _ := b.currentTarget.Load().(string); ct == target {
+					b.setState("error", "", err.Error())
+				}
+				return
+			}
+			_ = resp.Body.Close()
+			if ct, _ := b.currentTarget.Load().(string); ct == target {
+				b.setState("connected", node.LastPath(target), "")
+			}
+		}()
+	}
+
+	return b.StatusJSON()
+}

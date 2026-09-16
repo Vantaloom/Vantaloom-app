@@ -39,6 +39,9 @@ object Loom {
 
     fun isStarted(): Boolean = started
 
+    /** Foreground hook: kick signaling reconnect + re-warm the current target. */
+    fun resume(): String = bridge?.resume() ?: """{"state":"idle"}"""
+
     /**
      * Stops the overlay node (loopback proxy, sessions, Hub client). The Bridge
      * instance is retained and can be restarted with StartNode again.
