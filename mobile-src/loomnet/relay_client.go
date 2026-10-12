@@ -38,6 +38,18 @@ const relayOpenAckWait = 10 * time.Second
 // 可借此挂起 B 侧 goroutine（2026-08-11 review 发现）。
 const relayHandshakeTimeout = 10 * time.Second
 
+// WSS 控制连接的心跳参数。中继控制连接静默期很长（只在有人呼入时才收一帧），
+// 而中间的 Cloudflare Tunnel 会掐掉闲置连接——实测每 ~125 秒 close 1006 一次。
+//
+// relayWSSPingInterval 取 30 秒：远小于任何一级代理的闲置上限，代价是一个
+// 空控制帧。relayWSSPongTimeout 必须 > 2 × ping 周期，否则丢一个 pong 就
+// 误杀一条好连接（宁可晚一点发现死连接，也不要把活的掐了）。
+const (
+	relayWSSPingInterval = 30 * time.Second
+	relayWSSPongTimeout  = 90 * time.Second
+	relayWSSWriteWait    = 10 * time.Second
+)
+
 // relayIdleTimeout 是中继控制连接的 QUIC 空闲超时。比 overlay 直连（30s）更
 // 宽容：中继链路（本机→Hub relay→对端）跨公网，UDP 抖动窗口可能超过 30s，
 // 过短的 idle 会让控制连接在网络抖动时被误判死亡、触发重建（日志里的
@@ -93,6 +105,10 @@ type relayClient struct {
 	// dialOnly = 只拨号、不登记：跳过 HELLO（A 角色的会合客户端没有身份可报，
 	// 也不需要接收呼入）。
 	dialOnly bool
+	// pingInterval 覆盖 WSS 心跳周期（0 = 用 relayWSSPingInterval）。
+	// 只有测试会设它——生产里等一个 30 秒的心跳会把整个测试套拖慢 30 秒。
+	pingInterval time.Duration
+
 	// allowProvisional 只在会合模式下使用：B 侧接受入站会合电路时，对端通常
 	// 还没进信任表，握手要走与直连监听器同一套 provisional 校验（见
 	// newRelaySessionServerProvisional）。
@@ -154,16 +170,16 @@ func newRendezvousRelayClient(quicAddr, wssURL, spki, key string, id *Identity, 
 }
 
 // helloMsg 组装 HELLO 帧：会合模式只报会合键，账号模式报 machineId + JWT。
-// withJWT=false 用于 WSS（JWT 已在握手 header 里）。
-func (c *relayClient) helloMsg(withJWT bool) relayMsg {
+//
+// ⚠️ 账号模式下 JWT **无条件**进帧体，两条传输（QUIC 与 WSS）一视同仁。
+// 这里以前有个 withJWT 参数，WSS 那一路传 false——「header 里已经有了」。
+// 中继的 handleHello 只读帧体，于是 WSS 账号中继整整一年从未登记成功过。
+// 参数已经删掉：**没有那个开关，就没有人能再把它关上一次**。
+func (c *relayClient) helloMsg() relayMsg {
 	if c.rendezvous != "" {
 		return relayMsg{Type: "HELLO", Rendezvous: c.rendezvous}
 	}
-	msg := relayMsg{Type: "HELLO", MachineID: c.machineID}
-	if withJWT {
-		msg.JWT = c.jwt
-	}
-	return msg
+	return relayMsg{Type: "HELLO", MachineID: c.machineID, JWT: c.jwt}
 }
 
 // openRendezvousKey 是 OPEN/WSS 升级用的会合键：A 角色用对端的键（dialKey），
@@ -377,7 +393,7 @@ func (c *relayClient) connectQUIC(ctx context.Context) (*quicRelayConn, error) {
 		udp.Close()
 		return nil, fmt.Errorf("loomnet/relay: 开控制流: %w", err)
 	}
-	if err := writeRelayMsg(stream, c.helloMsg(true)); err != nil {
+	if err := writeRelayMsg(stream, c.helloMsg()); err != nil {
 		stream.Close()
 		conn.CloseWithError(quic.ApplicationErrorCode(1), "hello write")
 		udp.Close()
@@ -469,8 +485,10 @@ func publicKeySPKIFingerprint(pub any) (string, error) {
 // connectWSS 通过 WebSocket 建立中继控制连接并完成 HELLO 握手。网络 I/O，
 // 全程不持有 c.mu（M6 review 2026-08-14：锁外建连，锁只做状态提交）。WSS 模式
 // 下每个 WebSocket 连接 = 一条 relay 流；控制流是持久的 WebSocket，HELLO 后
-// 保持连接持续读 INCOMING。JWT 走 Authorization header（不走 URL query——
-// token 进 URL 会落在访问日志/浏览器历史/代理缓存，2026-08-11 review P3）。
+// 保持连接持续读 INCOMING。JWT 走 Authorization header **和 HELLO 帧体**两处
+// （都不走 URL query——token 进 URL 会落在访问日志/浏览器历史/代理缓存，
+// 2026-08-11 review P3）。两处都要：header 认的是「能不能升级这条 WS」，
+// 帧体认的是「这条控制连接登记给谁」，中继的 handleHello 只读后者。
 // 成功时返回已建好的 WebSocket 连接（未提交给 c.*），调用方须在锁内提交并
 // 随后启动 serveIncoming。WSS 走标准 HTTPS 证书校验（Cloudflare Tunnel 的合法
 // 证书，正常验证），不钉扎 SPKI。
@@ -488,8 +506,18 @@ func (c *relayClient) connectWSS(ctx context.Context) (*websocket.Conn, error) {
 		_ = ws.Close()
 		return nil, nil
 	}
-	// 发 HELLO 帧（带 machineId，JWT 已在握手 header 中）
-	if err := writeWSSRelayMsg(ws, c.helloMsg(false)); err != nil {
+	// 发 HELLO 帧（带 machineId **与 JWT**）。
+	//
+	// ⚠️ 这里曾经发 helloMsg(false)——理由是「JWT 已经在握手 header 里了」。
+	// 那个理由对**升级**这一跳成立，对 HELLO 这一帧不成立：中继的 handleHello
+	// 是两条传输共用的，它只认帧里的 msg.JWT，升级时校验出来的 claims 被丢掉了。
+	// 于是账号态的 WSS 中继**从 0.15.37 起就没有成功过一次**，而中继回的理由是
+	// 「无效或过期的令牌」——令牌明明是好的，只是压根没送到它面前。
+	// 2026-09-16 实测同一条连接、同一个有效令牌：不带 jwt → 无效或过期的令牌；
+	// 带 jwt → machineId 不属于该账号（即已经越过令牌校验）。
+	// OPEN/ACCEPT 两帧本来就一直在帧里带 JWT，这里不引入任何新的暴露面：
+	// 帧体走的是同一条 TLS，和 header 一样，**不是** URL query。
+	if err := writeWSSRelayMsg(ws, c.helloMsg()); err != nil {
 		ws.Close()
 		return nil, fmt.Errorf("loomnet/relay: WSS 发送 HELLO: %w", err)
 	}
@@ -775,9 +803,51 @@ func (c *relayClient) serveIncoming() {
 
 // serveIncomingWSS 在 WSS 模式下从控制 WebSocket 读 NDJSON 帧，
 // 处理 INCOMING 消息。逻辑与 serveIncoming 的 QUIC 分支一致，只是读取方式不同。
+//
+// 这里还负责**心跳**。中继控制连接平时一个字节都不走——它只在有人呼入时才收一条
+// INCOMING，其余时间完全静默。而链路中间的 Cloudflare Tunnel 会把闲置连接掐掉：
+// 2026-09-16 的生产日志里它每 ~125 秒准时 close 1006 一次，然后要 ~27 秒才重连
+// 上，**这段时间本机收不到任何 INCOMING**（对端拨过来只会看到「不在线」）。
+// QUIC 那条路一直有 KeepAlivePeriod（15s）顶着，WSS 这条路在此之前什么都没有。
 func (c *relayClient) serveIncomingWSS(ws *websocket.Conn) {
+	stop := make(chan struct{})
+	defer close(stop)
+
+	// 读超时靠 pong 续命：对端不再回 pong ⇒ 读超时报错 ⇒ reset 触发重连。
+	// 没有它的话，半开连接（对端已死但 FIN 没到）会让这个循环永远挂着，
+	// 而 serveRelay 认为「已连接」不再重试——静默失联，比断开还糟。
+	_ = ws.SetReadDeadline(time.Now().Add(relayWSSPongTimeout))
+	ws.SetPongHandler(func(string) error {
+		return ws.SetReadDeadline(time.Now().Add(relayWSSPongTimeout))
+	})
+	every := c.pingInterval
+	if every <= 0 {
+		every = relayWSSPingInterval
+	}
+	go func() {
+		ticker := time.NewTicker(every)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				// WriteControl 可与读循环并发（gorilla 明确允许），
+				// 而控制连接在 HELLO 之后没有别的写者。
+				if err := ws.WriteControl(websocket.PingMessage, nil, time.Now().Add(relayWSSWriteWait)); err != nil {
+					return
+				}
+			}
+		}
+	}()
+
 	for {
 		msg, err := readWSSRelayMsg(ws)
+		if err == nil {
+			// 任何一次成功读取都算「对端还活着」，同样续命。只靠 pong 续的话，
+			// 一条正忙着收 INCOMING 却恰好丢了个 pong 的连接会被误杀。
+			_ = ws.SetReadDeadline(time.Now().Add(relayWSSPongTimeout))
+		}
 		if err != nil {
 			log.Printf("[loomnet/relay] WSS 控制流读取结束: %v", err)
 			c.reset()
