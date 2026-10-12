@@ -279,6 +279,66 @@ func isPrivateV4(ip string) bool {
 	return v4 != nil && v4.IsPrivate()
 }
 
+// Resume is the Android foreground hook. When the overlay activity returns from
+// background, the EventSource on the JS side is dead but the underlying overlay
+// node's QUIC session may also be dead while Go objects still think they're
+// connected. This kicks signaling reconnect, refreshes the peer directory, and
+// re-dials the current target (if any) so the next SSE request can succeed.
+//
+// Returns the current status JSON (same shape as StatusJSON).
+//
+// 原生壳（Loom.kt / LoomJsBridge.kt）前台恢复时调 bridge.resume()；它与 iOS 的
+// Resume 逻辑同构。曾因 sync-mobile-src 从没有此方法的 apps/api/mobile 覆盖掉
+// 公开仓里手工保留的实现而导致 APK Kotlin 编译失败（Unresolved reference: resume），
+// 故把它钉回这里做真源，sync 自然带出。
+func (b *Bridge) Resume() string {
+	b.mu.Lock()
+	hub, node, warm, ctx := b.hub, b.node, b.warm, b.ctx
+	target, _ := b.currentTarget.Load().(string)
+	b.mu.Unlock()
+
+	// 1. Kick signaling reconnect + refresh peers (mirror iOS Resume logic).
+	if hub != nil {
+		select {
+		case hub.reconnect <- struct{}{}:
+		default:
+		}
+		select {
+		case hub.refresh <- struct{}{}:
+		default:
+		}
+	}
+
+	// 2. If a target is set, re-warm it in the background (15s).
+	if warm != nil && node != nil && ctx != nil && target != "" {
+		b.setState("connecting", "", "")
+		go func() {
+			dctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+			defer cancel()
+			req, err := http.NewRequestWithContext(dctx, http.MethodHead, "http://"+target+".loom/", nil)
+			if err != nil {
+				if ct, _ := b.currentTarget.Load().(string); ct == target {
+					b.setState("error", "", err.Error())
+				}
+				return
+			}
+			resp, err := warm.Do(req)
+			if err != nil {
+				if ct, _ := b.currentTarget.Load().(string); ct == target {
+					b.setState("error", "", err.Error())
+				}
+				return
+			}
+			_ = resp.Body.Close()
+			if ct, _ := b.currentTarget.Load().(string); ct == target {
+				b.setState("connected", node.LastPath(target), "")
+			}
+		}()
+	}
+
+	return b.StatusJSON()
+}
+
 // SetToken rotates the Hub JWT used by the mini Hub client for REST auth and
 // the signaling WS. Called from JS onToken as the token refreshes.
 func (b *Bridge) SetToken(token string) {
