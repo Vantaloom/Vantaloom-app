@@ -71,6 +71,10 @@ func (d *punchDialer) Explain(_ context.Context, peerID string) (bool, string) {
 	if fp == "" {
 		return false, "对方未上报 overlay 指纹（可能未运行 overlay 或版本过旧）。"
 	}
+	// 本机出站 UDP 被封：对所有对端都不可能成功（net_health.go）。
+	if known, blocked, why := d.n.udpEgressBlocked(); known && blocked {
+		return false, why
+	}
 	// 检查打洞结果缓存：失败的 peer 在 TTL 内直接跳过
 	d.n.punchMu.Lock()
 	entry, cached := d.n.punchCache[peerID]
@@ -120,6 +124,11 @@ func (d *punchDialer) Dial(ctx context.Context, peerID string) (Session, error) 
 	}
 	if err := dctx.Err(); err != nil {
 		return nil, err
+	}
+	// 出站 UDP 被封时别等满 12 秒：先确认一次（≤3s，缓存新鲜则零等待）。这不记进
+	// 单个对端的打洞缓存——它是本机网络的属性，net_health 统一管、换网络自动重测。
+	if blocked, why := d.n.ensureUDPEgress(dctx); blocked {
+		return nil, errors.New("loomnet: punch: " + why)
 	}
 
 	// 独立 UDP socket（随机端口），避免和 overlay socket 的 quic.Transport 竞争。

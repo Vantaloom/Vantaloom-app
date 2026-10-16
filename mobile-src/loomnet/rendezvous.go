@@ -103,6 +103,7 @@ func (n *Node) rendezvousServer() *relayClient {
 	}
 	n.rzServer = newRendezvousRelayClient(rc.QuicAddr, rc.WSSUrl, rc.RelaySPKI, n.rzKey,
 		n.identity, n.opts.Directory, n.opts.ProvisionalGate, n.adoptRendezvousInbound)
+	n.rzServer.wssDirectURL = rc.WSSDirectURL
 	n.rzServerFp = fp
 	return n.rzServer
 }
@@ -134,6 +135,7 @@ func (n *Node) rendezvousDialClient(peerKey string) (*relayClient, error) {
 	}
 	c := newRendezvousRelayClient(rc.QuicAddr, rc.WSSUrl, rc.RelaySPKI, "",
 		n.identity, n.opts.Directory, n.opts.ProvisionalGate, nil)
+	c.wssDirectURL = rc.WSSDirectURL
 	// 只拨号、不登记：拿对端的键去 HELLO 会把对端自己的登记顶掉（中继是后来者
 	// 覆盖），谁也别想连上。
 	c.dialKey = peerKey

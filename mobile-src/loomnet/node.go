@@ -101,6 +101,10 @@ type Options struct {
 type RelayConfig struct {
 	QuicAddr  string   // 中继 QUIC/UDP 公网地址，如 "vanta.timefiles.online:7343"
 	WSSUrl    string   // WSS 降级路径（QUIC/UDP 不可达时走 Cloudflare Tunnel 回退）
+	// WSSDirectURL 是不经 Cloudflare 的直连 WSS 中继（Hub 公网 TCP 端口，证书即 QUIC
+	// 中继那把、按 RelaySPKI 钉扎）。出站 UDP 被封的网络（校园网 / 企业网）只能走
+	// TCP，而经 Cloudflare 的回退在国内 RTT 400–800ms；它把这类网络拉回几十毫秒。
+	WSSDirectURL string
 	JWT       string   // Hub JWT，用于中继 HELLO/OPEN 认证
 	RelaySPKI string   // 中继自签证书公钥的 SPKI 指纹（hex sha256，Hub 下发）；空 = 不钉扎中继 TLS（旧 Hub，向后兼容）
 	StunAddrs []string // STUN 观测点公网坐标，用于 NAT 类型检测
@@ -177,6 +181,8 @@ func (rc *RelayConfig) Fingerprint() string {
 	io.WriteString(h, rc.QuicAddr)
 	h.Write([]byte{0})
 	io.WriteString(h, rc.WSSUrl)
+	h.Write([]byte{0})
+	io.WriteString(h, rc.WSSDirectURL)
 	h.Write([]byte{0})
 	io.WriteString(h, rc.JWT)
 	h.Write([]byte{0})
@@ -291,6 +297,9 @@ type Node struct {
 	// 返回本机 reflexive addr 作为 answer」的 B 侧处理（nil = 不响应打洞请求）。
 	loomOfferSender  func(ctx context.Context, peerID, myReflexiveAddr string) (peerReflexiveAddr string, err error)
 	loomOfferHandler func(fromMachineID, offerAddr string) (answerAddr string, err error)
+	// health 是本机网络体检（出站 UDP / 公网直连地址自检），见 net_health.go。
+	health netHealth
+
 	punchMu          sync.Mutex
 	// punchCache 记录每个 peer 上次打洞的结果（成功/失败），失败的 peer 下次
 	// 直接跳过打洞走中继，避免 symmetric NAT 用户每次都等 5s 超时。
@@ -452,6 +461,10 @@ func (n *Node) SetRelayConfig(rc *RelayConfig) {
 	}
 	n.relayMu.Unlock()
 	n.applyRelayConfig()
+	// 拿到 STUN 观测点就测一次出站 UDP：第一次拨号之前把结论备好。
+	if rc != nil && len(rc.StunAddrs) > 0 {
+		n.refreshUDPEgressAsync()
+	}
 }
 
 // applyRelayConfig 根据当前 opts.RelayConfig 注册 P2P 打洞与中继 dialer
@@ -732,6 +745,7 @@ func (n *Node) relayClient() *relayClient {
 		n.relay = nil
 	}
 	n.relay = newRelayClient(rc.QuicAddr, rc.WSSUrl, n.opts.MachineID, rc.JWT, rc.RelaySPKI, n.identity, n.opts.Directory, n.adoptRelayInbound)
+	n.relay.wssDirectURL = rc.WSSDirectURL
 	n.relayCfgFp = fp
 	return n.relay
 }

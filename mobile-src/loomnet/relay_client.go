@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -31,6 +32,15 @@ const relayALPN = "loom-relay/1"
 // 中继必回一帧，正常情况下一个 RTT 就到；这个值只用于中继失联时不无限挂起，
 // 且仅在拨号 ctx 没有 deadline 时才用得上（有 deadline 时以 ctx 为准）。
 const relayOpenAckWait = 10 * time.Second
+
+// relayDirectWSSBudget 是直连 WSS 中继一次建连（TCP + TLS + 升级 + HELLO）的预算。
+// 直连口被拦时这是唯一的等待；它必须明显短于 relayDialer 的总预算，Cloudflare
+// 那一档才来得及。
+const relayDirectWSSBudget = 5 * time.Second
+
+// relayQUICHeadStart 是 QUIC 在竞速里的先手：这么久还没握完就开始并行试 WSS。
+// UDP 通的网络里 QUIC 几十毫秒就握完，一秒足够它赢；UDP 被封时只多等这一秒。
+const relayQUICHeadStart = time.Second
 
 // relayHandshakeTimeout 是 B 侧（被叫方）入站 mTLS 握手的显式超时。A 侧拨号
 // 的握手走 relayDialer 的 dctx（relayTimeout=15s）；B 侧 handleIncoming 在
@@ -80,6 +90,14 @@ type relayClient struct {
 	mu        sync.Mutex
 	quicAddr  string
 	wssURL    string // WSS 回退端点（走 Cloudflare Tunnel）
+	// wssDirectURL 是不经 Cloudflare 的直连 WSS 中继（Hub 公网 TCP 端口，证书即 QUIC
+	// 中继那把、按 relaySPKI 钉扎）。QUIC 不通时**先**试它、再退 Cloudflare：出站
+	// UDP 被封的网络（校园网 / 企业网）只剩 TCP，经 Cloudflare 的 RTT 400–800ms，
+	// 直连只有几十毫秒（#129）。构造后设置一次、不再变。
+	wssDirectURL string
+	// wssActive 是 WSS 模式下**正在用**的那个端点（直连或 Cloudflare）。控制连接与
+	// 之后每条电路必须走同一个端点——中继按端点各自登记，电路开到另一个端点上会
+	// 找不到对端。
 	machineID string
 	jwt       string
 	identity  *Identity
@@ -128,6 +146,7 @@ type relayClient struct {
 	hello  bool // HELLO 已成功
 	closed bool
 	useWSS bool // 当前使用 WSS 模式（QUIC 不可达时回退）
+	wssActive atomic.Pointer[wssEndpoint]
 
 	// 控制流（HELLO 后持续监听 INCOMING）。HELLO-OK 后不关闭控制流，保存后
 	// 启动 serveIncoming goroutine 持续读取并处理 INCOMING 消息。
@@ -211,18 +230,64 @@ func (c *relayClient) acceptMsg(circuitID string) relayMsg {
 	return relayMsg{Type: "ACCEPT", CircuitID: circuitID, JWT: c.jwt}
 }
 
+// wssEndpoint 是一个 WSS 中继端点：Cloudflare 那个走标准 CA 校验；直连那个是
+// 自签证书，按 relaySPKI 钉扎。
+type wssEndpoint struct {
+	url    string
+	pinned bool
+}
+
+// activeWSS 是当前 WSS 模式在用的端点；还没建过连时退回 Cloudflare 那个。
+func (c *relayClient) activeWSS() wssEndpoint {
+	if ep := c.wssActive.Load(); ep != nil {
+		return *ep
+	}
+	return wssEndpoint{url: c.wssURL}
+}
+
 // wssDialURL 是 WSS 拨号地址。会合模式没有 JWT 可放进 Authorization 头，改用
 // 查询参数 rz 让中继在升级阶段就识别为匿名会合连接。
 func (c *relayClient) wssDialURL() string {
+	return c.wssDialURLFor(c.activeWSS())
+}
+
+func (c *relayClient) wssDialURLFor(ep wssEndpoint) string {
 	key := c.openRendezvousKey()
 	if key == "" {
-		return c.wssURL
+		return ep.url
 	}
 	sep := "?"
-	if strings.Contains(c.wssURL, "?") {
+	if strings.Contains(ep.url, "?") {
 		sep = "&"
 	}
-	return c.wssURL + sep + "rz=" + url.QueryEscape(key)
+	return ep.url + sep + "rz=" + url.QueryEscape(key)
+}
+
+// wssDialer 给某个端点的拨号器：直连端点钉扎中继证书的 SPKI 指纹（与 QUIC 同一把
+// 证书、同一个指纹），不信任任何 CA。
+func (c *relayClient) wssDialer(ep wssEndpoint) *websocket.Dialer {
+	dialer := &websocket.Dialer{HandshakeTimeout: handshakeIdle}
+	if ep.pinned {
+		dialer.TLSClientConfig = &tls.Config{
+			InsecureSkipVerify:    true,
+			MinVersion:            tls.VersionTLS13,
+			VerifyPeerCertificate: relaySPKIMatcher(c.relaySPKI),
+		}
+	}
+	return dialer
+}
+
+// wssCandidates 是 QUIC 不通时依次尝试的 WSS 端点：直连（有指纹才敢用自签证书）
+// 在前，Cloudflare 在后。
+func (c *relayClient) wssCandidates() []wssEndpoint {
+	var out []wssEndpoint
+	if c.wssDirectURL != "" && c.relaySPKI != "" {
+		out = append(out, wssEndpoint{url: c.wssDirectURL, pinned: true})
+	}
+	if c.wssURL != "" {
+		out = append(out, wssEndpoint{url: c.wssURL})
+	}
+	return out
 }
 
 // ensureConnected 建立到中继的控制连接并完成 HELLO 握手（幂等，已连接则
@@ -282,48 +347,148 @@ func (c *relayClient) ensureConnected(ctx context.Context) error {
 // 状态并启动 serveIncoming。优先 QUIC/UDP，连不上自动回退 WSS。调用者不得
 // 持有 c.mu。
 func (c *relayClient) connectWithFallback(ctx context.Context) error {
-	// 先尝试 QUIC（首选），连不上再回退 WSS
-	var lastErr error
-	if c.quicAddr != "" {
-		res, err := c.connectQUIC(ctx)
-		if err == nil {
-			c.mu.Lock()
-			c.ctrlStream = res.stream
-			c.ctrlBr = res.br
-			c.conn = res.conn
-			c.udp = res.udp
-			c.qt = res.qt
-			c.useWSS = false
-			c.hello = true
-			c.mu.Unlock()
-			go c.serveIncoming()
-			return nil
-		}
-		lastErr = err
-		log.Printf("[loomnet/relay] QUIC 连接 %s 失败，尝试 WSS 回退: %v", c.quicAddr, err)
+	// QUIC 与 WSS **竞速**（happy-eyeballs，#129）：QUIC 先跑，relayQUICHeadStart 内
+	// 还没成功（或已经失败）就开始按顺序试 WSS（直连在前、Cloudflare 在后），谁先建
+	// 好用谁，输家关掉。
+	//
+	// 以前是串行：QUIC 失败要等满握手超时（公网 10s + 本地回环再 10s）才轮到 WSS。
+	// 出站 UDP 被封的网络（校园网 / 企业网）里 QUIC 永远失败，于是**每一次**建连 /
+	// 重连都白等 20 秒——这期间对端看到的就是「掉线」。UDP 通的网络里 QUIC 通常几十
+	// 毫秒就握完，一秒的先手足够它赢。
+	type attempt struct {
+		quic *quicRelayConn
+		ws   *websocket.Conn
+		ep   wssEndpoint
+		wss  bool
+		err  error
+	}
+	candidates := c.wssCandidates()
+	if c.quicAddr == "" && len(candidates) == 0 {
+		return fmt.Errorf("loomnet/relay: 无可用中继连接方式（QUIC 和 WSS 均未配置或失败）")
 	}
 
-	// 回退 WSS（走 Cloudflare Tunnel，穿透 NAT）
-	if c.wssURL != "" {
-		ws, err := c.connectWSS(ctx)
-		if err == nil {
+	raceCtx, cancelRace := context.WithCancel(ctx)
+	defer cancelRace()
+	results := make(chan attempt, 2)
+	quicDone := make(chan struct{})
+	pending := 0
+
+	if c.quicAddr != "" {
+		pending++
+		go func() {
+			defer close(quicDone)
+			res, err := c.connectQUIC(raceCtx)
+			if err != nil {
+				log.Printf("[loomnet/relay] QUIC 连接 %s 失败: %v", c.quicAddr, err)
+			}
+			results <- attempt{quic: res, err: err}
+		}()
+	} else {
+		close(quicDone)
+	}
+	if len(candidates) > 0 {
+		pending++
+		go func() {
+			select {
+			case <-quicDone:
+			case <-time.After(relayQUICHeadStart):
+			case <-raceCtx.Done():
+				results <- attempt{wss: true, err: raceCtx.Err()}
+				return
+			}
+			var lastErr error
+			for _, ep := range candidates {
+				if raceCtx.Err() != nil {
+					break
+				}
+				attemptCtx, cancel := raceCtx, context.CancelFunc(func() {})
+				if ep.pinned {
+					// 直连口可能被对方网络或云安全组拦掉：给它短一点的预算，别把
+					// Cloudflare 那一档拖到 relayDialer 的总预算之外。
+					attemptCtx, cancel = context.WithTimeout(raceCtx, relayDirectWSSBudget)
+				}
+				ws, err := c.connectWSS(attemptCtx, ep)
+				cancel()
+				if err == nil {
+					results <- attempt{ws: ws, ep: ep, wss: true}
+					return
+				}
+				lastErr = err
+				if ep.pinned && raceCtx.Err() == nil {
+					log.Printf("[loomnet/relay] 直连 WSS %s 失败，退回 Cloudflare: %v", ep.url, err)
+				}
+			}
+			if lastErr == nil {
+				lastErr = raceCtx.Err()
+			}
+			results <- attempt{wss: true, err: lastErr}
+		}()
+	}
+
+	var errs []error
+	for pending > 0 {
+		got := <-results
+		pending--
+		if got.err != nil {
+			errs = append(errs, got.err)
+			continue
+		}
+		// 赢家：取消另一路，它若也建好了就关掉（在后台收尾，不耽误这次建连）。
+		cancelRace()
+		if pending > 0 {
+			go func(left int) {
+				for ; left > 0; left-- {
+					loser := <-results
+					if loser.quic != nil {
+						loser.quic.close()
+					}
+					if loser.ws != nil {
+						_ = loser.ws.Close()
+					}
+				}
+			}(pending)
+		}
+		if got.wss {
+			ep := got.ep
+			c.wssActive.Store(&ep)
 			c.mu.Lock()
-			c.ctrlWS = ws
+			c.ctrlWS = got.ws
 			c.useWSS = true
 			c.hello = true
 			c.mu.Unlock()
-			go c.serveIncoming()
-			return nil
+		} else {
+			c.mu.Lock()
+			c.ctrlStream = got.quic.stream
+			c.ctrlBr = got.quic.br
+			c.conn = got.quic.conn
+			c.udp = got.quic.udp
+			c.qt = got.quic.qt
+			c.useWSS = false
+			c.hello = true
+			c.mu.Unlock()
 		}
-		return err
+		go c.serveIncoming()
+		return nil
 	}
+	// 全部失败：把每一路的具体原因原样上抛（含 SPKI 钉扎失败等根因），不吞成笼统
+	// 的「无可用连接方式」——禁静默兜底。
+	return errors.Join(errs...)
+}
 
-	// 无 WSS 可回退时，把 QUIC 的具体失败原因原样上抛（含 SPKI 钉扎失败等
-	// 根因），不吞成笼统的「无可用连接方式」——禁静默兜底。
-	if lastErr != nil {
-		return lastErr
+// close 释放一次没被采用的 QUIC 中继建连（竞速输家）。
+func (r *quicRelayConn) close() {
+	if r == nil {
+		return
 	}
-	return fmt.Errorf("loomnet/relay: 无可用中继连接方式（QUIC 和 WSS 均未配置或失败）")
+	if r.stream != nil {
+		r.stream.Close()
+	}
+	if r.conn != nil {
+		_ = r.conn.CloseWithError(quic.ApplicationErrorCode(0), "lost race")
+	}
+	if r.udp != nil {
+		_ = r.udp.Close()
+	}
 }
 
 // quicRelayConn 是一次成功建立的 QUIC 中继控制连接的资源集合。
@@ -492,13 +657,10 @@ func publicKeySPKIFingerprint(pub any) (string, error) {
 // 成功时返回已建好的 WebSocket 连接（未提交给 c.*），调用方须在锁内提交并
 // 随后启动 serveIncoming。WSS 走标准 HTTPS 证书校验（Cloudflare Tunnel 的合法
 // 证书，正常验证），不钉扎 SPKI。
-func (c *relayClient) connectWSS(ctx context.Context) (*websocket.Conn, error) {
-	dialer := websocket.Dialer{
-		HandshakeTimeout: handshakeIdle,
-	}
-	ws, _, err := dialer.DialContext(ctx, c.wssDialURL(), wssAuthHeader(c.jwt))
+func (c *relayClient) connectWSS(ctx context.Context, ep wssEndpoint) (*websocket.Conn, error) {
+	ws, _, err := c.wssDialer(ep).DialContext(ctx, c.wssDialURLFor(ep), wssAuthHeader(c.jwt))
 	if err != nil {
-		return nil, fmt.Errorf("loomnet/relay: WSS 连接 %s: %w", c.wssURL, err)
+		return nil, fmt.Errorf("loomnet/relay: WSS 连接 %s: %w", ep.url, err)
 	}
 	if c.dialOnly {
 		// 只拨号：不登记控制连接。WSS 每条电路各开一个连接，这个连接本身用不到
@@ -528,7 +690,11 @@ func (c *relayClient) connectWSS(ctx context.Context) (*websocket.Conn, error) {
 	}
 	switch resp.Type {
 	case "HELLO-OK":
-		log.Printf("[loomnet/relay] WSS 控制连接已建立（反射地址 %s）", resp.ObservedAddr)
+		via := "Cloudflare"
+		if ep.pinned {
+			via = "直连"
+		}
+		log.Printf("[loomnet/relay] WSS 控制连接已建立（%s %s，反射地址 %s）", via, ep.url, resp.ObservedAddr)
 	case "HELLO-ERR":
 		ws.Close()
 		return nil, fmt.Errorf("loomnet/relay: WSS 中继拒绝 HELLO：%s", resp.Reason)
@@ -623,10 +789,8 @@ func (c *relayClient) tryOpenCircuit(ctx context.Context, targetMachineID string
 // 连接 = 一条电路流。OPEN 帧需要带 from（客户端 machineId），因为 WSS 模式下
 // 服务端无法从连接反查主叫身份。
 func (c *relayClient) tryOpenCircuitWSS(ctx context.Context, targetMachineID string) (net.Conn, error) {
-	dialer := websocket.Dialer{
-		HandshakeTimeout: handshakeIdle,
-	}
-	ws, _, err := dialer.DialContext(ctx, c.wssDialURL(), wssAuthHeader(c.jwt))
+	ep := c.activeWSS()
+	ws, _, err := c.wssDialer(ep).DialContext(ctx, c.wssDialURLFor(ep), wssAuthHeader(c.jwt))
 	if err != nil {
 		return nil, fmt.Errorf("loomnet/relay: WSS 开电路流: %w", err)
 	}
@@ -923,10 +1087,8 @@ func (c *relayClient) serverHandshake(ctx context.Context, pipe net.Conn, fromID
 // 在 WebSocket 字节管道上跑 mTLS(server)+yamux(server)，调用 onIncoming 把入站
 // Session 交给 node。
 func (c *relayClient) handleIncomingWSS(fromID, circuitID string) {
-	dialer := websocket.Dialer{
-		HandshakeTimeout: handshakeIdle,
-	}
-	ws, _, err := dialer.DialContext(context.Background(), c.wssDialURL(), wssAuthHeader(c.jwt))
+	ep := c.activeWSS()
+	ws, _, err := c.wssDialer(ep).DialContext(context.Background(), c.wssDialURLFor(ep), wssAuthHeader(c.jwt))
 	if err != nil {
 		log.Printf("[loomnet/relay] WSS 开 ACCEPT 流失败: %v", err)
 		return

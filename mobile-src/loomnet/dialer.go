@@ -283,6 +283,9 @@ func (d *publicDialer) Explain(_ context.Context, peerID string) (bool, string) 
 	if eps.Public == "" {
 		return false, "对方未配置公网直连地址。拥有公网 IP 或已做端口转发的机器（如云服务器）可在对方的 设置→网络与设备→公网直连 开启（固定 UDP 端口 + 公网地址），任意网络的机器即可直连它。"
 	}
+	if known, blocked, why := d.n.udpEgressBlocked(); known && blocked {
+		return false, why
+	}
 	return true, fmt.Sprintf("对方通告了公网直连地址 %s，可从任意网络发起 QUIC/UDP 直连（mTLS 指纹校验）。", eps.Public)
 }
 
@@ -326,6 +329,9 @@ func (d *reverseDialer) Explain(_ context.Context, peerID string) (bool, string)
 			return false, fmt.Sprintf("无需反拨：对方已配置公网直连（%s），本机可经「公网直连」正向直达。反拨只服务反方向（对方拨不通本机、而本机可被公网直连）的场景。", eps.Public)
 		}
 		return false, "本机未配置公网直连，无法请对方反拨本机。任一方在 设置→网络与设备→公网直连 开启后，双方即可互通（另一方无需公网）。"
+	}
+	if known, ok, why := d.n.selfPublicStatus(); known && !ok {
+		return false, why
 	}
 	if d.n.reverseRequester() == nil {
 		return false, "Hub 信令未接入（未登录 Hub 或运行时尚未完成接线），无法发送反拨请求。"
