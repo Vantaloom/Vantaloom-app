@@ -294,6 +294,25 @@ jobs:
           done
           echo "All required native binaries are present in the APK."
 
+      - name: Assert the phone-control accessibility service is in the APK manifest
+        run: |
+          set -euo pipefail
+          APK="android/app/build/outputs/apk/release/app-release-unsigned.apk"
+          AAPT="$ANDROID_SDK_ROOT/build-tools/34.0.0/aapt"
+          DUMP="$("$AAPT" dump xmltree "$APK" AndroidManifest.xml)"
+          for needle in \
+            online.timefiles.vantaloom.phone.a11y.PhoneAccessibilityService \
+            android.permission.BIND_ACCESSIBILITY_SERVICE \
+            android.accessibilityservice.AccessibilityService; do
+            if ! grep -Fq "$needle" <<<"$DUMP"; then
+              echo "ERROR: merged manifest is missing $needle"; exit 1
+            fi
+          done
+          if ! unzip -l "$APK" | grep -q 'assets/vantaloom-phone-plugin/plugin.json'; then
+            echo "ERROR: phone-control plugin manifest asset missing from APK"; exit 1
+          fi
+          echo "phone-control service + plugin asset present."
+
       - name: Sign release APK (keystore from GitHub secrets)
         env:
           SIGNING_KEYSTORE_BASE64: ${{ secrets.SIGNING_KEYSTORE_BASE64 }}
@@ -327,7 +346,13 @@ jobs:
 
           mkdir -p dist
           SHA="$(git rev-parse --short HEAD)"
-          NAME="vantaloom-build${GITHUB_RUN_NUMBER}-${SHA}.apk"
+          # 非 main 分支（实验包）文件名与 tag 都带 phone 前缀：应用内更新的正则
+          # apk-build(\d+)- 匹配不到它，就算误标 latest 也不会把实验包推给正式用户。
+          if [ "${GITHUB_REF}" = "refs/heads/main" ]; then
+            NAME="vantaloom-build${GITHUB_RUN_NUMBER}-${SHA}.apk"
+          else
+            NAME="vantaloom-phone-build${GITHUB_RUN_NUMBER}-${SHA}.apk"
+          fi
           cp "$ALIGNED" "dist/$NAME"
           echo "APK_NAME=$NAME" >> "$GITHUB_ENV"
           echo "Signed: dist/$NAME"; ls -la dist
@@ -345,12 +370,24 @@ jobs:
         run: |
           set -euo pipefail
           SHA="$(git rev-parse --short HEAD)"
-          TAG="apk-build${GITHUB_RUN_NUMBER}-${SHA}"
           APK="dist/${APK_NAME}"
           # 版本号从 APK 自己报的那个真源现取，别在这里再写一份镜像——
           # 上一份写死的 "0.14.33" 从 0.14.33 一路挂到了 0.16.63。
           VER="$(sed -n 's/.*versionName = "\([^"]*\)".*/\1/p' android/app/build.gradle.kts | head -1)"
           if [ -n "$VER" ]; then VERLINE="Vantaloom $VER Android local-first client."; else VERLINE="Vantaloom Android local-first client."; fi
+          if [ "${GITHUB_REF}" != "refs/heads/main" ]; then
+            # 实验分支：prerelease + 显式不标 latest（应用内更新只查 /releases/latest），
+            # tag 用 apk-phone-build…，不匹配 AppUpdate 的 apk-build(\d+)- 解析。
+            TAG="apk-phone-build${GITHUB_RUN_NUMBER}-${SHA}"
+            gh release create "$TAG" "$APK" \
+              --target "$GITHUB_SHA" \
+              --title "Vantaloom Android · phone-control experiment · build ${GITHUB_RUN_NUMBER} (${SHA})" \
+              --notes "EXPERIMENTAL branch ${GITHUB_REF_NAME} — not field-tested. Adds on-device phone control (accessibility service + loopback MCP). ${VERLINE} Signed with the same release key, so it installs over the stable APK without uninstalling. Its versionCode is the CI run number, so going back requires the NEXT stable build (an older stable APK is a downgrade and Android refuses it)." \
+              --prerelease --latest=false
+            echo "Released prerelease $TAG → $(basename "$APK")"
+            exit 0
+          fi
+          TAG="apk-build${GITHUB_RUN_NUMBER}-${SHA}"
           gh release create "$TAG" "$APK" \
             --target "$GITHUB_SHA" \
             --title "Vantaloom Android · build ${GITHUB_RUN_NUMBER} (${SHA})" \
