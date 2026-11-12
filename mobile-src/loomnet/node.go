@@ -45,12 +45,21 @@ type Directory interface {
 	AccountFingerprints() map[string]string
 }
 
+// InboundPolicy is an optional Directory extension (机器隔离, 2026-10): an
+// account peer for which InboundDenied is true still passes the mTLS handshake
+// — so this machine can dial it and use that connection — but every request
+// that peer sends in is refused. Isolation is one-way: others reach an isolated
+// machine, it reaches nobody.
+type InboundPolicy interface {
+	InboundDenied(machineID string) bool
+}
+
 // Endpoints are a machine's overlay dial candidates (§4.1). LAN entries are bare
 // IPs (paired with UDPPort) or "ip:port"; UDPPort is the overlay UDP socket
 // port. Public is the machine's EXPLICITLY CONFIGURED 公网直连 address
 // ("host:port"; 0.14 第二连接方式) — never auto-derived: no reflexive
 // discovery, no hole punching, no relay. Only machines with a real public
-// address (cloud box / port-forward) set it, in 设置→网络与设备→公网直连.
+// address (cloud box / port-forward) set it, in 设置→设备与网络→公网直连.
 // Further methods are added one at a time via the DialerRegistry — see
 // docs/network-connectivity-redesign.md §8.
 type Endpoints struct {
@@ -542,6 +551,8 @@ func (n *Node) SetConnectionPrefs(p *ConnectionPrefs) {
 	n.relayMu.Lock()
 	n.connPrefs = p
 	n.relayMu.Unlock()
+	// 偏好只拦新拨号；走着被关闭方式的旧连接要断掉，否则开关看起来没生效。
+	n.evictDisabledPaths(p)
 }
 
 // ConnectionPrefs 返回当前生效的连接偏好，nil = 未设置（默认全开）。
@@ -964,7 +975,7 @@ func (n *Node) SelfReachability() []MethodStatus {
 		public.Available = true
 		public.Detail = fmt.Sprintf("已配置公网直连地址 %s（本机实际监听 UDP 端口 %d）。任意网络的机器可经此直连本机；本机主动访问不同网络的机器时也会自动请其反拨本机（反向公网直连，0.14.3）——单侧可公网直连即可互通。请确保该 UDP 端口已在系统防火墙与云安全组放行，且端口转发（如有）指向本机。", eps.Public, eps.UDPPort)
 	default:
-		public.Detail = "未配置。拥有公网 IP 或已做端口转发的机器（如云服务器）可在 设置→网络与设备→公网直连 开启：固定 UDP 端口并填写公网地址，跨网络的机器即可直连本机；且只要任一方开启，双方即可互通（反向公网直连）。"
+		public.Detail = "未配置。拥有公网 IP 或已做端口转发的机器（如云服务器）可在 设置→设备与网络→公网直连 开启：固定 UDP 端口并填写公网地址，跨网络的机器即可直连本机；且只要任一方开启，双方即可互通（反向公网直连）。"
 	}
 	if public.Active {
 		public.Detail = fmt.Sprintf("当前有 %d 条活跃连接经此方式通信。", inUse[pathPublic]) + " " + public.Detail
@@ -1031,6 +1042,14 @@ func (n *Node) inboundTrusted(cn, fp string) bool {
 	return n.opts.Directory.AccountFingerprints()[cn] == fp
 }
 
+// inboundDenied reports whether the directory refuses requests from this
+// (trusted) peer — see InboundPolicy. Evaluated per request, so an isolation
+// toggle applies to live connections on the next directory refresh.
+func (n *Node) inboundDenied(machineID string) bool {
+	p, ok := n.opts.Directory.(InboundPolicy)
+	return ok && p.InboundDenied(machineID)
+}
+
 // serveHandler wraps LocalHandler and stamps the verified caller identity. Any
 // client-supplied X-Loom-* header is FIRST stripped so no spoofed value ever
 // survives. A trusted peer gets X-Loom-From (+ fingerprint); a provisional
@@ -1051,6 +1070,10 @@ func (n *Node) serveHandler() http.Handler {
 			return
 		}
 		if n.inboundTrusted(id, fp) {
+			if n.inboundDenied(id) {
+				http.Error(w, "loomnet: 对方处于隔离状态，只能被连接，不能访问本机", http.StatusForbidden)
+				return
+			}
 			peer := AuthenticatedPeer{MachineID: id, Fingerprint: fp, valid: func() bool { return n.inboundTrusted(id, fp) }}
 			r = r.WithContext(context.WithValue(r.Context(), authenticatedPeerKey{}, peer))
 			r.Header.Set(headerLoomFrom, id)

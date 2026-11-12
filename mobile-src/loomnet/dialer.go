@@ -281,7 +281,7 @@ func (d *publicDialer) Explain(_ context.Context, peerID string) (bool, string) 
 		return false, "尚未从 Hub 获取到对方的 overlay 连接信息。对方需在线并运行 0.13.7 及以上版本；本机每 60 秒自动刷新一次对方信息。"
 	}
 	if eps.Public == "" {
-		return false, "对方未配置公网直连地址。拥有公网 IP 或已做端口转发的机器（如云服务器）可在对方的 设置→网络与设备→公网直连 开启（固定 UDP 端口 + 公网地址），任意网络的机器即可直连它。"
+		return false, "对方未配置公网直连地址。拥有公网 IP 或已做端口转发的机器（如云服务器）可在对方的 设置→设备与网络→公网直连 开启（固定 UDP 端口 + 公网地址），任意网络的机器即可直连它。"
 	}
 	if known, blocked, why := d.n.udpEgressBlocked(); known && blocked {
 		return false, why
@@ -328,7 +328,7 @@ func (d *reverseDialer) Explain(_ context.Context, peerID string) (bool, string)
 		if _, eps, ok := d.n.opts.Directory.PeerInfo(peerID); ok && eps.Public != "" {
 			return false, fmt.Sprintf("无需反拨：对方已配置公网直连（%s），本机可经「公网直连」正向直达。反拨只服务反方向（对方拨不通本机、而本机可被公网直连）的场景。", eps.Public)
 		}
-		return false, "本机未配置公网直连，无法请对方反拨本机。任一方在 设置→网络与设备→公网直连 开启后，双方即可互通（另一方无需公网）。"
+		return false, "本机未配置公网直连，无法请对方反拨本机。任一方在 设置→设备与网络→公网直连 开启后，双方即可互通（另一方无需公网）。"
 	}
 	if known, ok, why := d.n.selfPublicStatus(); known && !ok {
 		return false, why
