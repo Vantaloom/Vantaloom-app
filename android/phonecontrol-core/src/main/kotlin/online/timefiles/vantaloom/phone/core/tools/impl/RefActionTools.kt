@@ -279,7 +279,7 @@ class TypeTool : BaseTool("type", ToolKind.ACT, SemanticRisk.RISKY) {
         }
         val ok = candidates.any { n ->
             val got = normalize(index.realText(n))
-            got.contains(want) || (want.isEmpty() && got.isEmpty())
+            got == want
         }
         if (ok) return null
         val got = candidates.firstOrNull()?.let { clip(Masking.mask(index.realText(it)).text, 40) } ?: ""
