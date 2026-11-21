@@ -253,6 +253,7 @@ class CollectTool : BaseTool("collect", ToolKind.OBSERVE, SemanticRisk.SAFE) {
         "max_pages" to Schema.int("最多滚几页，默认 5", min = 1, max = 30, default = 5),
         "until" to Schema.str("可选：出现这段文本就停（包含匹配，不区分大小写）", maxLength = 200),
         "direction" to Schema.enum("滚动方向，默认 down（往下看更多）；聊天记录往上翻旧消息用 up", listOf("up", "down", "left", "right"), "down"),
+        required = listOf("ref"),
     )
     override val serialized get() = true
     override val needsOverlay get() = true
