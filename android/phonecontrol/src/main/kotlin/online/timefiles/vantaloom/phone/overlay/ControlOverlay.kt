@@ -447,6 +447,8 @@ class ControlOverlay(
         root.addView(row, OverlayStyle.lp(ctx, 10f, LinearLayout.LayoutParams.WRAP_CONTENT))
 
         val lp = params(WRAP, WRAP, FLAGS_PASSIVE_TOUCHABLE, Gravity.TOP or Gravity.START)
+        // 加窗前先算好位置：update() 对未挂载的 View 是空操作，加窗后再定位会在 (0,0) 停一帧以上。
+        placeCapsule(lp)
         try {
             wm.addView(root, lp)
         } catch (t: Throwable) {
@@ -459,13 +461,17 @@ class ControlOverlay(
         capsuleLine = lineView
         capsulePause = pause
         updatePauseButton()
-        positionCapsule()
         applyState()
     }
 
     private fun positionCapsule() {
         val v = capsule ?: return
         val lp = capsuleParams ?: return
+        placeCapsule(lp)
+        update(v, lp)
+    }
+
+    private fun placeCapsule(lp: WindowManager.LayoutParams) {
         val b = ballParams ?: return
         val gap = OverlayStyle.dp(ctx, 6f)
         if (ballOnLeft()) {
@@ -478,7 +484,6 @@ class ControlOverlay(
         }
         // 胶囊不能盖住系统状态栏（时间、通知图标）。
         lp.y = b.y.coerceAtLeast(statusBarHeight())
-        update(v, lp)
     }
 
     @SuppressLint("DiscouragedApi", "InternalInsetResource")
