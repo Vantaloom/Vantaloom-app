@@ -21,7 +21,7 @@ android {
         // CI only overrides versionCode so every APK remains upgradable. Keep
         // versionName tied to the product release instead of inventing a build suffix.
         versionCode = (project.findProperty("versionCode") as String?)?.toIntOrNull() ?: 1
-        versionName = "0.16.63"
+        versionName = "0.23.20"
 
         // The gomobile AAR ships a per-ABI .so; the CI binds android/arm64 only.
         ndk {
@@ -92,6 +92,9 @@ android {
 dependencies {
     // The loomnet overlay facade, built by `gomobile bind` in CI (app/libs/loomnet.aar).
     implementation(files("libs/loomnet.aar"))
+
+    // 手机操控（实验）：无障碍 + loopback MCP。见 PhoneControlIntegration.kt。
+    implementation(project(":phonecontrol"))
 
     implementation("androidx.webkit:webkit:1.11.0")
     implementation("androidx.core:core-ktx:1.13.1")

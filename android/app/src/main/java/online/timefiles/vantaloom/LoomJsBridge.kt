@@ -13,6 +13,9 @@ import android.os.PowerManager
 import android.provider.Settings
 import android.util.Base64
 import android.webkit.JavascriptInterface
+import online.timefiles.vantaloom.phone.a11y.PhoneAccessibilityService
+import online.timefiles.vantaloom.phone.host.PhoneControlHost
+import online.timefiles.vantaloom.phone.setup.AccessibilityGuide
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
@@ -540,6 +543,46 @@ class LoomJsBridge(
                 } catch (e: Throwable) {
                     reject(callId, e.message ?: "无法打开电池优化设置")
                 }
+            }
+        }
+    }
+
+    // ---- Phone control (accessibility + loopback MCP, #284) ----
+
+    /** Accessibility-service / MCP state for the settings card; sync, read-only. */
+    @JavascriptInterface
+    fun phoneControlStatus(): String = PhoneControlStatus.json(context)
+
+    /** Open the system accessibility settings so the user can enable the service. */
+    @JavascriptInterface
+    fun openPhoneControlSetup(secret: String, callId: String) {
+        if (!authorized(secret)) {
+            reject(callId, "unauthorized")
+            return
+        }
+        android.os.Handler(context.mainLooper).post {
+            if (AccessibilityGuide.openAccessibilitySettings(context)) {
+                resolve(callId, PhoneControlStatus.json(context))
+            } else {
+                reject(callId, "无法打开无障碍设置")
+            }
+        }
+    }
+
+    /** Stop any running phone task and switch the accessibility service off. */
+    @JavascriptInterface
+    fun stopPhoneControl(secret: String, callId: String) {
+        if (!authorized(secret)) {
+            reject(callId, "unauthorized")
+            return
+        }
+        android.os.Handler(context.mainLooper).post {
+            try {
+                PhoneControlHost.stopTask("user_stopped_from_settings")
+                PhoneAccessibilityService.current()?.disableSelf()
+                resolve(callId, PhoneControlStatus.json(context))
+            } catch (e: Throwable) {
+                reject(callId, e.message ?: "停止失败")
             }
         }
     }

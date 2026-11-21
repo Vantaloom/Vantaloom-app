@@ -8,6 +8,8 @@ key.properties
 android/.gradle/
 android/build/
 android/app/build/
+android/phonecontrol/build/
+android/phonecontrol-core/build/
 android/local.properties
 android/captures/
 .gradle/

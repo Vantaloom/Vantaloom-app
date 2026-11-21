@@ -157,6 +157,8 @@ object LocalRuntime {
             capabilityToken = launchCapabilityToken
             launchCompleted = true
             Log.i(TAG, "local runtime ready on 127.0.0.1:$readPort")
+            // 手机操控（实验）：把设备侧 MCP 端点注册/重放进插件系统。异步、失败只记日志。
+            PhoneControlIntegration.onRuntimeReady(appContext, readPort, launchBearerToken)
             return Endpoint(readPort, launchBearerToken, launchCapabilityToken)
         } catch (error: Throwable) {
             launchFailure = error
@@ -192,6 +194,7 @@ object LocalRuntime {
 
     fun stop() {
         requestStop()
+        PhoneControlIntegration.onRuntimeStopped()
         synchronized(this) {
             process?.destroy()
             process = null
