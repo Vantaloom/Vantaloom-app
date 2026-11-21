@@ -8,6 +8,7 @@ import online.timefiles.vantaloom.phone.core.model.RawNode
 import online.timefiles.vantaloom.phone.core.model.RawSnapshot
 import online.timefiles.vantaloom.phone.core.model.phoneError
 import online.timefiles.vantaloom.phone.core.observe.ElementState
+import online.timefiles.vantaloom.phone.core.observe.Masking
 import online.timefiles.vantaloom.phone.core.observe.Observation
 import online.timefiles.vantaloom.phone.core.observe.ObservedElement
 import online.timefiles.vantaloom.phone.core.safety.ActionIntent
@@ -281,7 +282,7 @@ class TypeTool : BaseTool("type", ToolKind.ACT, SemanticRisk.RISKY) {
             got.contains(want) || (want.isEmpty() && got.isEmpty())
         }
         if (ok) return null
-        val got = candidates.firstOrNull()?.let { clip(index.realText(it), 40) } ?: ""
+        val got = candidates.firstOrNull()?.let { clip(Masking.mask(index.realText(it)).text, 40) } ?: ""
         throw PhoneException(
             ErrorCode.ACTION_FAILED,
             "写入后回读不符：输入框现在是「$got」（App 可能拒绝了直接写入或做了格式化）",
