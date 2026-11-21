@@ -374,7 +374,9 @@ jobs:
           APK="dist/${APK_NAME}"
           # 版本号从 APK 自己报的那个真源现取，别在这里再写一份镜像——
           # 上一份写死的 "0.14.33" 从 0.14.33 一路挂到了 0.16.63。
-          VER="$(sed -n 's/.*versionName = "\([^"]*\)".*/\1/p' android/app/build.gradle.kts | head -1)"
+          # 现在的真源是 core-version.txt（与 .so 同目录由主仓脚本写入，gradle 的
+          # versionName 也从它读），别再回 grep build.gradle.kts。
+          VER="$(tr -d '[:space:]' < android/app/src/main/jniLibs/arm64-v8a/core-version.txt)"
           if [ -n "$VER" ]; then VERLINE="Vantaloom $VER Android local-first client."; else VERLINE="Vantaloom Android local-first client."; fi
           if [ "${GITHUB_REF}" != "refs/heads/main" ]; then
             # 实验分支：prerelease + 显式不标 latest（应用内更新只查 /releases/latest），

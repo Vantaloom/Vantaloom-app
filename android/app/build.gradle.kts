@@ -21,7 +21,19 @@ android {
         // CI only overrides versionCode so every APK remains upgradable. Keep
         // versionName tied to the product release instead of inventing a build suffix.
         versionCode = (project.findProperty("versionCode") as String?)?.toIntOrNull() ?: 1
-        versionName = "0.23.20"
+        // versionName MUST track the bundled core (libvantaloom.so): LocalRuntime
+        // reports it as the host version (VANTALOOM_VERSION) and plugin installs
+        // gate on minHostVersion — a stale literal once froze it at 0.16.63 while
+        // the shipped .so was already 0.23.20. Single source: core-version.txt
+        // written by the main repo's scripts/build-android-runtime.ps1 into the
+        // same directory as the .so on every runtime build (AGP only packages
+        // *.so from jniLibs, so the marker never ships inside the APK).
+        // Missing/garbage file fails the build.
+        versionName = file("src/main/jniLibs/arm64-v8a/core-version.txt").readText().trim().also {
+            require(it.matches(Regex("""\d+\.\d+\.\d+(-\S+)?"""))) {
+                "jniLibs core-version.txt is not a valid version: '$it'"
+            }
+        }
 
         // The gomobile AAR ships a per-ABI .so; the CI binds android/arm64 only.
         ndk {
@@ -43,6 +55,12 @@ android {
             // zipaligns + apksigner-signs it with the keystore from GitHub secrets
             // (see .github/workflows/build-apk.yml).
         }
+    }
+
+    buildFeatures {
+        // BuildConfig.VERSION_NAME mirrors versionName for the unit test that
+        // asserts the APK version follows core-version.txt.
+        buildConfig = true
     }
 
     compileOptions {
