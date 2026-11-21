@@ -41,6 +41,9 @@ object PhoneControlIntegration {
         }
     }
 
+    /** 最近一次插件注册同步的结果；bridge 还没起过为 null。 */
+    fun syncState(): VantaloomRuntimeBridge.SyncState? = bridge?.lastState
+
     fun onRuntimeStopped() {
         try {
             bridge?.onRuntimeGone()

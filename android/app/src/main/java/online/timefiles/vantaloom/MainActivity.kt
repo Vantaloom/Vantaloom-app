@@ -841,6 +841,15 @@ class MainActivity : Activity() {
     requestIgnoreBatteryOptimizations: function (callbackId) {
       N.requestIgnoreBatteryOptimizations(__loomSecret, callbackId);
     },
+    phoneControlStatus: function () {
+      return typeof N.phoneControlStatus === "function" ? N.phoneControlStatus() : '{"available":false}';
+    },
+    openPhoneControlSetup: function (callbackId) {
+      N.openPhoneControlSetup(__loomSecret, callbackId);
+    },
+    stopPhoneControl: function (callbackId) {
+      N.stopPhoneControl(__loomSecret, callbackId);
+    },
     notificationTarget: function () { return N.notificationTarget(); }
   };
 })();

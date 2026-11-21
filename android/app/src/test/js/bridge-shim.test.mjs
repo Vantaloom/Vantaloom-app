@@ -110,6 +110,13 @@ window.__loomNative = {
     calls.installUpdateCallbackId = callbackId
   },
   notificationTarget: () => '{"conversationId":"conv-x"}',
+  phoneControlStatus: () => '{"available":true,"serviceState":"disabled"}',
+  openPhoneControlSetup() {
+    calls.phoneSetupArgs = [...arguments]
+  },
+  stopPhoneControl() {
+    calls.phoneStopArgs = [...arguments]
+  },
   restoreLocalRuntimeAuth(secret) {
     calls.restore += 1
     calls.restoreSecret = secret
@@ -228,6 +235,17 @@ assert.equal(calls.installUpdateSecret, bridgeSecret)
 assert.equal(window.__loomBridge.storageAccessGranted(), true)
 window.__loomBridge.requestStorageAccess("loom-storage-1")
 assert.deepEqual(calls.storageAccessArgs, [bridgeSecret, "loom-storage-1"])
+
+// 手机操控三件套：status 只读不带 secret；打开无障碍设置与停止都是特权方法
+// （secret 在前、callId 在后）——顺序写反的表现是「点了开关没反应」。
+assert.equal(
+  window.__loomBridge.phoneControlStatus(),
+  '{"available":true,"serviceState":"disabled"}'
+)
+window.__loomBridge.openPhoneControlSetup("loom-phone-setup-1")
+assert.deepEqual(calls.phoneSetupArgs, [bridgeSecret, "loom-phone-setup-1"])
+window.__loomBridge.stopPhoneControl("loom-phone-stop-1")
+assert.deepEqual(calls.phoneStopArgs, [bridgeSecret, "loom-phone-stop-1"])
 
 const helperDescriptor = Object.getOwnPropertyDescriptor(
   window,
