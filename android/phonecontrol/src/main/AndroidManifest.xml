@@ -5,6 +5,9 @@
     <!-- notify 工具与「任务进行中」通知。宿主 targetSdk 28 时系统自动授予；将来 targetSdk≥33 需要运行时申请。 -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!-- alarm/timer 工具：部分时钟 App 的 SET_ALARM/SET_TIMER 入口要求此普通权限，缺了会启动失败。 -->
+    <uses-permission android:name="com.android.alarm.permission.SET_ALARM" />
+
     <!--
         包可见性（Android 11+）：apps 工具要列出「可启动应用」，open(app=…) 要按包名解析启动入口，
         安全门还要判断前台包的显示名。两种做法的取舍：
