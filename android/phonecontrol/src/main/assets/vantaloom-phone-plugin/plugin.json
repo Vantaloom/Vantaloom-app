@@ -1,0 +1,28 @@
+{
+  "id": "vantaloom-phone",
+  "version": "1.0.0",
+  "name": "手机操控",
+  "description": "让 agent 通过无障碍服务查看并操作这台安卓手机：读屏幕、点击、输入、滚动、启动应用、发系统意图。写操作的人工确认在手机浮层上完成（只接受真实触摸），用户可随时在浮层或通知上停止。",
+  "author": "vantaloom",
+  "minHostVersion": "0.20.0",
+  "runtime": "mcp",
+  "mcp": {
+    "transport": "http",
+    "url": "http://127.0.0.1:1/mcp"
+  },
+  "permissions": {
+    "network": ["127.0.0.1"]
+  },
+  "sharing": {
+    "shareable": true,
+    "exports": ["tools"]
+  },
+  "tools": [
+    { "name": "status", "risk": "safe" },
+    { "name": "apps", "risk": "safe" },
+    { "name": "screen", "risk": "safe" },
+    { "name": "collect", "risk": "safe" },
+    { "name": "wait", "risk": "safe" },
+    { "name": "handoff", "risk": "safe" }
+  ]
+}

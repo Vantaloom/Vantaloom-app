@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 无障碍设置页里用户看到的服务名与说明：显著披露要讲清「能看屏幕、能点击」。 -->
+    <string name="vantaloom_phone_service_label">Vantaloom 手机操控</string>
+    <string name="vantaloom_phone_service_summary">让 Vantaloom 的 AI 助手在你同意后查看屏幕内容并代为点击、输入。</string>
+    <string name="vantaloom_phone_service_description">开启后，Vantaloom 的 AI 助手可以读取屏幕上的文字和控件、截取屏幕、模拟点击和滑动、在输入框里填写内容。\n\n任务进行时屏幕上会一直显示一个状态小球，可以随时暂停或停止；长按小球 1 秒立即停止。支付、银行、密码管理类应用和系统安全设置页默认禁止操作；发送、删除、付款等敏感动作会弹出确认卡，只接受你手指的真实点击。\n\n屏幕内容只在本机的 Vantaloom 运行时之间传递，密码框内容永不读取。</string>
+
+    <!-- 浮层 -->
+    <string name="vantaloom_phone_confirm_title">Vantaloom 想要…</string>
+    <string name="vantaloom_phone_allow_once">允许一次</string>
+    <string name="vantaloom_phone_allow_task">本任务内都允许</string>
+    <string name="vantaloom_phone_reject">拒绝</string>
+    <string name="vantaloom_phone_handoff_title">请你接手一下</string>
+    <string name="vantaloom_phone_handoff_resume">我弄好了，继续</string>
+    <string name="vantaloom_phone_handoff_abandon">放弃</string>
+    <string name="vantaloom_phone_pause">暂停</string>
+    <string name="vantaloom_phone_resume">继续</string>
+    <string name="vantaloom_phone_stop">停止</string>
+    <string name="vantaloom_phone_leave_note">给 agent 留言</string>
+    <string name="vantaloom_phone_send">发送</string>
+    <string name="vantaloom_phone_cancel">取消</string>
+
+    <!-- 通知 -->
+    <string name="vantaloom_phone_channel_task">手机操控任务</string>
+    <string name="vantaloom_phone_channel_task_desc">AI 助手正在操作手机时显示，可从这里停止。</string>
+    <string name="vantaloom_phone_channel_agent">AI 助手消息</string>
+    <string name="vantaloom_phone_channel_agent_desc">AI 助手通过 notify 工具发来的提醒。</string>
+    <string name="vantaloom_phone_task_notification_title">AI 助手正在操作手机</string>
+    <string name="vantaloom_phone_stop_action">停止操作</string>
+</resources>

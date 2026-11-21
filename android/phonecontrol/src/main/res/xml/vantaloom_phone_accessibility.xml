@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    无障碍服务配置。取舍说明：
+
+    - typeAllMask：稳定判定（awaitSettle）靠「最近一次事件」的时间戳，少听任何一类（如滚动、
+      内容变化）都会让「安静」误判；前台包变化也靠 TYPE_WINDOW_STATE_CHANGED。
+    - flagRetrieveInteractiveWindows：拿到全部窗口（输入法、系统弹窗、分屏），不只活动窗口。
+    - flagReportViewIds：viewIdResourceName 是指纹与安全门（验证码/支付密码关键词）的输入。
+    - flagIncludeNotImportantViews：很多自绘 App 把可点节点标成 not important，不开就看不到。
+    - **不要** flagRequestFilterKeyEvents：那会让系统把用户的按键事件先交给本服务过滤，
+      等于一个键盘记录器的能力；我们不需要拦按键，申请它只会加重授权弹窗的警示、
+      增加每次按键的延迟，并让安全审查更难通过。确认卡是触摸交互，不依赖按键。
+    - canPerformGestures：dispatchGesture（tap/swipe 兜底）。
+    - canTakeScreenshot（API 30+ 属性，低版本系统忽略）：takeScreenshot。
+    - notificationTimeout 100：同类事件最少间隔 100ms，给 350ms 的安静窗口留足分辨率，又不至于被事件淹没。
+-->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:accessibilityEventTypes="typeAllMask"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagRetrieveInteractiveWindows|flagReportViewIds|flagIncludeNotImportantViews"
+    android:canRetrieveWindowContent="true"
+    android:canPerformGestures="true"
+    android:canTakeScreenshot="true"
+    android:notificationTimeout="100"
+    android:description="@string/vantaloom_phone_service_description"
+    android:summary="@string/vantaloom_phone_service_summary"
+    tools:ignore="UnusedAttribute" />

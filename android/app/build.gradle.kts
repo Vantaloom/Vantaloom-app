@@ -93,6 +93,9 @@ dependencies {
     // The loomnet overlay facade, built by `gomobile bind` in CI (app/libs/loomnet.aar).
     implementation(files("libs/loomnet.aar"))
 
+    // 手机操控（实验）：无障碍 + loopback MCP。见 PhoneControlIntegration.kt。
+    implementation(project(":phonecontrol"))
+
     implementation("androidx.webkit:webkit:1.11.0")
     implementation("androidx.core:core-ktx:1.13.1")
 

@@ -1,0 +1,95 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- notify 工具与「任务进行中」通知。宿主 targetSdk 28 时系统自动授予；将来 targetSdk≥33 需要运行时申请。 -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!--
+        包可见性（Android 11+）：apps 工具要列出「可启动应用」，open(app=…) 要按包名解析启动入口，
+        安全门还要判断前台包的显示名。两种做法的取舍：
+
+        1. QUERY_ALL_PACKAGES：能看到全部已装包（含无 LAUNCHER 的服务型应用），
+           getApplicationLabel/getLaunchIntentForPackage 对任意包都稳定。代价是 Google Play 把它列为
+           敏感权限要审核；但本 APK 走 GitHub Release 自分发、targetSdk 28，实际上连包可见性
+           限制都不生效（限制只对 targetSdk≥30 生效），声明它是为将来抬 targetSdk 时不出回归。
+        2. <queries> 里声明 MAIN/LAUNCHER intent：只能看到有桌面入口的应用，这正好覆盖 apps/open
+           的需求，而且不是敏感权限。缺点是前台若是无桌面入口的包（如系统组件弹窗），取不到显示名。
+
+        两者都写：并入 Vantaloom-app 或上架时如果要去掉 QUERY_ALL_PACKAGES，<queries> 仍保住主要功能。
+        同理列出 intent 工具用到的动作，保证 resolveActivity 在包可见性下也能解析。
+    -->
+    <uses-permission
+        android:name="android.permission.QUERY_ALL_PACKAGES"
+        tools:ignore="QueryAllPackagesPermission" />
+
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="https" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="geo" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.DIAL" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.SENDTO" />
+            <data android:scheme="smsto" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.SENDTO" />
+            <data android:scheme="mailto" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.SEND" />
+            <data android:mimeType="text/plain" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.INSERT" />
+            <data android:mimeType="vnd.android.cursor.dir/event" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.SET_ALARM" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.SET_TIMER" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.WEB_SEARCH" />
+        </intent>
+    </queries>
+
+    <application>
+
+        <!--
+            无障碍服务本体。BIND_ACCESSIBILITY_SERVICE 保证只有系统能绑定它；
+            exported=true 是无障碍服务的硬性要求（系统跨进程绑定），权限已把其他调用方挡在门外。
+        -->
+        <service
+            android:name=".a11y.PhoneAccessibilityService"
+            android:exported="true"
+            android:label="@string/vantaloom_phone_service_label"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/vantaloom_phone_accessibility" />
+        </service>
+
+        <!-- 通知上「停止操作」按钮的接收器。只接受本应用的显式 PendingIntent，故 exported=false。 -->
+        <receiver
+            android:name=".overlay.StopTaskReceiver"
+            android:exported="false" />
+
+    </application>
+
+</manifest>
