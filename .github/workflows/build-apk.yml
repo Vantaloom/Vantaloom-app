@@ -36,7 +36,8 @@ jobs:
       # is gone, sandbox is proot + Ubuntu Base pulled at runtime.
       # NOTE: the Termux pool keeps ONLY the newest build of each package — a
       # proot version bump upstream 404s the pinned URL and this job fails loud
-      # (2026-07-21: .85 → .86; 2026-07-27: .86 → .87). Re-pin: list
+      # (2026-07-21: .85 → .86; 2026-07-27: .86 → .87; 2026-11-21: .96 → .102).
+      # Re-pin: list
       # https://packages.termux.dev/apt/termux-main/pool/main/p/proot/ , download,
       # sha256sum, verify the data.tar layout still has bin/proot + libexec/proot/
       # loader{,32}, then update BOTH values below.
@@ -44,8 +45,8 @@ jobs:
       # （5.1.107.85 -> .86 -> .90 -> .91 已经咬过四次）。下面的 fetch_deb 会在钉子
       # 取不到时退到仓库自己的 Packages 索引，用**索引里的 SHA256** 校验后继续，
       # 并打一条 ::warning:: 报出新版本号——看到告警就回来把钉子刷新一次。
-      PROOT_DEB_URL: "https://packages.termux.dev/apt/termux-main/pool/main/p/proot/proot_5.1.107.96_aarch64.deb"
-      PROOT_DEB_SHA256: "8199dca06dccb693ec09fb1759e3e1ad08b4863f0c11c612f89c20bd9ecdc1a0"
+      PROOT_DEB_URL: "https://packages.termux.dev/apt/termux-main/pool/main/p/proot/proot_5.1.107.102_aarch64.deb"
+      PROOT_DEB_SHA256: "10a394b585c2fc2b2c8502544f4e5f1be581dc8bfff79e8ba62f16207423e030"
       TALLOC_DEB_URL: "https://packages.termux.dev/apt/termux-main/pool/main/libt/libtalloc/libtalloc_2.5.0_aarch64.deb"
       TALLOC_DEB_SHA256: "556591f43bb773ad8777e1a29522640866a55f95dab71914418b94a8c58ad5a7"
       SHMEM_DEB_URL: "https://packages.termux.dev/apt/termux-main/pool/main/liba/libandroid-shmem/libandroid-shmem_0.7_aarch64.deb"
