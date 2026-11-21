@@ -103,6 +103,10 @@ internal object OverlayStyle {
         b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
         b.setAllCaps(false) // isAllCaps 的 getter 是 API 28，直接调 setter
         b.stateListAnimator = null
+        // 系统 Button 默认 minWidth 88dp：胶囊里三个按钮并排会被挤到折行、裁字。
+        b.minWidth = 0
+        b.minimumWidth = 0
+        b.isSingleLine = true
         b.minHeight = dp(c, 44f) // 触控目标 ≥ 44dp（可访问性）
         b.minimumHeight = dp(c, 44f)
         val h = dp(c, 14f)

@@ -476,8 +476,15 @@ class ControlOverlay(
             lp.gravity = Gravity.TOP or Gravity.END
             lp.x = ctx.resources.displayMetrics.widthPixels - b.x + gap
         }
-        lp.y = b.y
+        // 胶囊不能盖住系统状态栏（时间、通知图标）。
+        lp.y = b.y.coerceAtLeast(statusBarHeight())
         update(v, lp)
+    }
+
+    @SuppressLint("DiscouragedApi", "InternalInsetResource")
+    private fun statusBarHeight(): Int {
+        val id = ctx.resources.getIdentifier("status_bar_height", "dimen", "android")
+        return if (id > 0) ctx.resources.getDimensionPixelSize(id) else OverlayStyle.dp(ctx, 24f)
     }
 
     private fun removeCapsule() {
