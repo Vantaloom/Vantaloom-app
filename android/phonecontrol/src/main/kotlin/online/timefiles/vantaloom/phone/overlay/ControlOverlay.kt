@@ -610,34 +610,37 @@ class ControlOverlay(
         }
 
         val root = OverlayStyle.card(ctx)
-        root.addView(OverlayStyle.text(ctx, ctx.getString(R.string.vantaloom_phone_confirm_title), 13f, OverlayStyle.TEXT_SECONDARY))
-        root.addView(OverlayStyle.text(ctx, req.summary, 17f, bold = true), OverlayStyle.lp(ctx, 4f))
-        root.addView(OverlayStyle.text(ctx, "原因：" + req.reason, 14f, OverlayStyle.ACCENT), OverlayStyle.lp(ctx, 6f))
+        root.addView(OverlayStyle.text(ctx, ctx.getString(R.string.vantaloom_phone_confirm_title), 12f, OverlayStyle.TEXT_SECONDARY))
+        root.addView(OverlayStyle.text(ctx, req.summary, 16f, bold = true), OverlayStyle.lp(ctx, 4f))
+        root.addView(OverlayStyle.reasonChip(ctx, req.reason), OverlayStyle.lp(ctx, 10f, LinearLayout.LayoutParams.WRAP_CONTENT))
         val app = when {
             req.appLabel != null && req.packageName != null -> "${req.appLabel}（${req.packageName}）"
             req.appLabel != null -> req.appLabel
             req.packageName != null -> req.packageName
             else -> null
         }
-        if (app != null) root.addView(OverlayStyle.text(ctx, "应用：$app", 13f, OverlayStyle.TEXT_SECONDARY), OverlayStyle.lp(ctx, 4f))
+        if (app != null) root.addView(OverlayStyle.text(ctx, "应用：$app", 12f, OverlayStyle.TEXT_SECONDARY), OverlayStyle.lp(ctx, 10f))
         req.remoteCaller?.let {
-            root.addView(OverlayStyle.text(ctx, "发起方：$it（远端会话）", 13f, OverlayStyle.TEXT_SECONDARY), OverlayStyle.lp(ctx, 2f))
+            root.addView(OverlayStyle.text(ctx, "发起方：$it（远端会话）", 12f, OverlayStyle.TEXT_SECONDARY), OverlayStyle.lp(ctx, 2f))
         }
         val timer = OverlayStyle.text(ctx, "", 12f, OverlayStyle.TEXT_SECONDARY)
-        root.addView(timer, OverlayStyle.lp(ctx, 6f))
+        root.addView(timer, OverlayStyle.lp(ctx, 2f))
 
         val once = guarded(R.string.vantaloom_phone_allow_once, OverlayStyle.POSITIVE) { pending.resolve(ConfirmDecision.ALLOW_ONCE) }
         val reject = guarded(R.string.vantaloom_phone_reject, OverlayStyle.DANGER) { pending.resolve(ConfirmDecision.REJECT) }
         val buttons = ArrayList<GuardedButton>()
-        root.addView(once, OverlayStyle.lp(ctx, 12f))
+        // 拒绝在左、允许在右（与 Web 端对话框的「取消 / 确认」顺序一致）；「本任务内都允许」是次要选项，放在下面。
+        val row = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
+        row.addView(reject, LinearLayout.LayoutParams(0, WRAP, 1f))
+        row.addView(once, LinearLayout.LayoutParams(0, WRAP, 1f).apply { marginStart = OverlayStyle.dp(ctx, 8f) })
+        root.addView(row, OverlayStyle.lp(ctx, 14f))
+        buttons += reject
         buttons += once
         if (req.allowTaskWide) {
             val task = guarded(R.string.vantaloom_phone_allow_task, OverlayStyle.NEUTRAL) { pending.resolve(ConfirmDecision.ALLOW_TASK) }
             root.addView(task, OverlayStyle.lp(ctx, 8f))
             buttons += task
         }
-        root.addView(reject, OverlayStyle.lp(ctx, 8f))
-        buttons += reject
 
         val wrapper = cardWrapper(root)
         // 目标在屏幕下半部时卡片放上面，别把用户要核对的那个元素挡住。

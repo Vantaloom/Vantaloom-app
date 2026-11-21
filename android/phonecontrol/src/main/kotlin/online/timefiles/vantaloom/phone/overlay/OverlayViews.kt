@@ -6,6 +6,7 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.RectF
+import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.util.TypedValue
 import android.view.Gravity
@@ -21,14 +22,18 @@ import online.timefiles.vantaloom.phone.core.ports.ActivityPhase
  * 也不依赖宿主主题——无障碍服务的 Context 主题在各 ROM 上不一致，显式设色最稳。
  */
 internal object OverlayStyle {
-    const val CARD_BG = 0xF21E1E24.toInt()
-    const val CARD_STROKE = 0x33FFFFFF
-    const val TEXT_PRIMARY = Color.WHITE
-    const val TEXT_SECONDARY = 0xFFB8B8C4.toInt()
-    const val ACCENT = 0xFFFF8C00.toInt()
-    const val DANGER = 0xFFE5484D.toInt()
-    const val NEUTRAL = 0xFF3A3A46.toInt()
-    const val POSITIVE = 0xFF2E9E5B.toInt()
+    // 取自 Vantaloom 深色主题（packages/ui globals.css .dark）：中性灰卡片 + 10% 白描边，主按钮为浅色实底。
+    const val CARD_BG = 0xF7171717.toInt()
+    const val CARD_STROKE = 0x1AFFFFFF
+    const val TEXT_PRIMARY = 0xFFFAFAFA.toInt()
+    const val TEXT_SECONDARY = 0xFFA3A3A3.toInt()
+    const val ACCENT = 0xFFFBBF24.toInt()
+    const val ACCENT_BG = 0x1AFBBF24
+    const val DANGER = 0xFFFF6467.toInt()
+    const val NEUTRAL = 0xFF262626.toInt()
+    const val POSITIVE = 0xFFE5E5E5.toInt()
+    private const val ON_POSITIVE = 0xFF171717.toInt()
+    private val MEDIUM: Typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
 
     fun dp(context: Context, v: Float): Int =
         TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v, context.resources.displayMetrics).toInt()
@@ -64,7 +69,7 @@ internal object OverlayStyle {
         orientation = LinearLayout.VERTICAL
         val p = dp(context, 16f)
         setPadding(p, p, p, p)
-        background = roundRect(context, CARD_BG, 16f, CARD_STROKE)
+        background = roundRect(context, CARD_BG, 12f, CARD_STROKE)
         elevation = dp(context, 8f).toFloat()
     }
 
@@ -73,22 +78,44 @@ internal object OverlayStyle {
             text = value
             setTextColor(color)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, sizeSp)
-            if (bold) paint.isFakeBoldText = true
+            if (bold) typeface = MEDIUM
             setLineSpacing(0f, 1.15f)
         }
 
     /** 给按钮（普通 Button 或 GuardedButton）统一上色与尺寸。 */
     fun styleButton(b: Button, color: Int) {
         val c = b.context
-        b.setTextColor(Color.WHITE)
-        b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+        when (color) {
+            POSITIVE -> {
+                b.setTextColor(ON_POSITIVE)
+                b.background = roundRect(c, POSITIVE, 8f)
+            }
+            DANGER -> {
+                b.setTextColor(DANGER)
+                b.background = roundRect(c, 0x1FFF6467, 8f, 0x4DFF6467)
+            }
+            else -> {
+                b.setTextColor(TEXT_PRIMARY)
+                b.background = roundRect(c, color, 8f, CARD_STROKE)
+            }
+        }
+        b.typeface = MEDIUM
+        b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
         b.setAllCaps(false) // isAllCaps 的 getter 是 API 28，直接调 setter
-        b.background = roundRect(c, color, 10f)
+        b.stateListAnimator = null
         b.minHeight = dp(c, 44f) // 触控目标 ≥ 44dp（可访问性）
         b.minimumHeight = dp(c, 44f)
         val h = dp(c, 14f)
         b.setPadding(h, 0, h, 0)
         b.gravity = Gravity.CENTER
+    }
+
+    /** 「原因」提示条：琥珀色字 + 10% 琥珀底，对应 Web 端的 warning 提示。 */
+    fun reasonChip(context: Context, value: CharSequence): TextView = text(context, value, 13f, ACCENT).apply {
+        background = roundRect(context, ACCENT_BG, 6f)
+        val h = dp(context, 10f)
+        val v = dp(context, 6f)
+        setPadding(h, v, h, v)
     }
 
     fun lp(context: Context, topMarginDp: Float = 0f, width: Int = LinearLayout.LayoutParams.MATCH_PARENT): LinearLayout.LayoutParams =
