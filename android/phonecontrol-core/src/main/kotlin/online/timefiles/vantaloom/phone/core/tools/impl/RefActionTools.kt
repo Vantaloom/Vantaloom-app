@@ -47,6 +47,10 @@ internal fun EngineContext.prepareRef(
         val again = registry.relocate(driver, el, budgets, gate)
         el = again.first
         obs = again.second
+        // 重定位后目标可能已落在另一页（如受保护的设置页）：硬拒绝按新屏再判一次。
+        gate.hardDeny(intent(el, obs))?.let { d ->
+            throw PhoneException(ErrorCode.DENIED_POLICY, d.reason, mapOf("rule" to d.rule))
+        }
         precheck(el)
     }
     checkpoint()
