@@ -6,6 +6,7 @@ import online.timefiles.vantaloom.phone.core.model.DisplayKind
 import online.timefiles.vantaloom.phone.core.model.ErrorCode
 import online.timefiles.vantaloom.phone.core.model.NodeAction
 import online.timefiles.vantaloom.phone.core.model.PhoneException
+import online.timefiles.vantaloom.phone.core.safety.ActionIntent
 import online.timefiles.vantaloom.phone.core.model.phoneError
 import online.timefiles.vantaloom.phone.core.observe.ElementState
 import online.timefiles.vantaloom.phone.core.observe.Observation
@@ -237,7 +238,7 @@ class ScreenTool : BaseTool("screen", ToolKind.OBSERVE, SemanticRisk.SAFE) {
  * 协议 §4 `collect`：滚动一个容器并累积去重后的子项，用于读长列表（聊天记录、搜索结果）。
  *
  * 只读语义：不点击，但滚动会改变界面位置，所以走动作串行锁（避免和 tap 交错）。
- * 不过安全门：滚动不产生副作用，而且在确认卡上反复问「允许滚动吗」没有意义。
+ * 不弹确认卡：滚动不产生副作用，反复问「允许滚动吗」没有意义；但硬拒绝（受限应用、受保护设置页）和 scroll 一样生效。
  * 但它会开任务并计一次动作（[startsTask]）：屏幕在自动滚动，浮层必须在场，用户才能看见并停止它。
  *
  * 去重键用「角色 + 原始文本」而不是指纹：指纹含 bounds，滚动后同一项的位置会变。
@@ -307,6 +308,9 @@ class CollectTool : BaseTool("collect", ToolKind.OBSERVE, SemanticRisk.SAFE) {
         val first = e.registry.relocate(driver, target, e.budgets, e.gate)
         target = first.first
         obs = first.second
+        e.gate.hardDeny(
+            ActionIntent(tool = name, packageName = target.packageName ?: obs.packageName, element = target, screen = obs, coordinate = false),
+        )?.let { d -> throw PhoneException(ErrorCode.DENIED_POLICY, d.reason, mapOf("rule" to d.rule)) }
         harvest(obs, target)
         while (hit == null && pages < maxPages) {
             e.checkpoint()
