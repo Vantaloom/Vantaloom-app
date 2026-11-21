@@ -24,12 +24,14 @@ android {
         // versionName MUST track the bundled core (libvantaloom.so): LocalRuntime
         // reports it as the host version (VANTALOOM_VERSION) and plugin installs
         // gate on minHostVersion — a stale literal once froze it at 0.16.63 while
-        // the shipped .so was already 0.23.20. Single source: core-version.txt,
-        // rewritten by the main repo's scripts/build-android-runtime.ps1 next to
-        // the .so on every runtime build. Missing/garbage file fails the build.
-        versionName = file("core-version.txt").readText().trim().also {
+        // the shipped .so was already 0.23.20. Single source: core-version.txt
+        // written by the main repo's scripts/build-android-runtime.ps1 into the
+        // same directory as the .so on every runtime build (AGP only packages
+        // *.so from jniLibs, so the marker never ships inside the APK).
+        // Missing/garbage file fails the build.
+        versionName = file("src/main/jniLibs/arm64-v8a/core-version.txt").readText().trim().also {
             require(it.matches(Regex("""\d+\.\d+\.\d+(-\S+)?"""))) {
-                "android/app/core-version.txt is not a valid version: '$it'"
+                "jniLibs core-version.txt is not a valid version: '$it'"
             }
         }
 
